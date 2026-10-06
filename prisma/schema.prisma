@@ -1,0 +1,367 @@
+// Esquema de la plataforma de contenidos de Digo Telecom.
+// Un mismo backend administra dos sitios: DIGO HOGAR y DIGO EMPRESAS.
+
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Site {
+  HOGAR
+  EMPRESAS
+}
+
+// ─── Usuarios del panel ────────────────────────────────────────────────────
+
+enum Role {
+  ADMIN // todo, incluidos usuarios y publicación
+  AGENTE // atiende consultas y reclamos
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  name         String
+  passwordHash String
+  role         Role     @default(AGENTE)
+  /// Espacios del panel a los que tiene acceso (Hogar, Empresas o ambos).
+  sites        Site[]   @default([HOGAR, EMPRESAS])
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  complaintResponses Complaint[]       @relation("ComplaintRespondedBy")
+  assignedComplaints Complaint[]       @relation("ComplaintAssignedTo")
+  assignedInquiries  ContactInquiry[]  @relation("InquiryAssignedTo")
+  attendedInquiries  ContactInquiry[]  @relation("InquiryAttendedBy")
+  publications       SitePublication[] @relation("SitePublishedBy")
+}
+
+// ─── Libro de Reclamaciones ────────────────────────────────────────────────
+
+enum ComplaintKind {
+  RECLAMO // disconformidad con el producto o servicio
+  QUEJA // malestar con la atención, no relacionado al producto o servicio
+}
+
+enum DocumentType {
+  DNI
+  CE
+  PASAPORTE
+  RUC
+}
+
+enum ContractedItem {
+  PRODUCTO
+  SERVICIO
+}
+
+enum ComplaintStatus {
+  PENDIENTE
+  EN_PROCESO
+  RESPONDIDO
+}
+
+/// Correlativo anual de hojas de reclamación. Una fila por año.
+model ComplaintSequence {
+  year Int @id
+  last Int @default(0)
+}
+
+/// Hoja de reclamación. Nunca se elimina: el registro se conserva al menos dos años.
+model Complaint {
+  id       String        @id @default(uuid()) @db.Uuid
+  /// Número visible para el consumidor, p. ej. "000015-2026".
+  code     String        @unique
+  year     Int
+  sequence Int
+  site     Site
+  kind     ComplaintKind
+
+  // Consumidor
+  documentType     DocumentType
+  documentNumber   String
+  fullName         String
+  address          String
+  email            String
+  phone            String
+  isMinor          Boolean      @default(false)
+  guardianName     String?
+  guardianDocument String?
+
+  // Bien contratado
+  itemType        ContractedItem
+  amount          Decimal?       @db.Decimal(10, 2)
+  itemDescription String
+
+  // Reclamo
+  detail  String
+  request String
+
+  // Gestión
+  status         ComplaintStatus @default(PENDIENTE)
+  dueDate        DateTime        @db.Date
+  response       String?
+  respondedAt    DateTime?
+  respondedBy    User?           @relation("ComplaintRespondedBy", fields: [respondedById], references: [id])
+  respondedById  String?         @db.Uuid
+  /// Agente que trabaja la hoja (evita que dos personas respondan lo mismo).
+  assignedTo     User?           @relation("ComplaintAssignedTo", fields: [assignedToId], references: [id])
+  assignedToId   String?         @db.Uuid
+  /// Notas internas del equipo; el consumidor nunca las ve.
+  internalNotes  String?
+  receiptSentAt  DateTime?
+  responseSentAt DateTime?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  @@unique([year, sequence])
+  @@index([status, dueDate])
+  @@index([site, createdAt])
+  @@index([assignedToId, status])
+}
+
+// ─── Consultas de contacto ─────────────────────────────────────────────────
+
+enum InquiryStatus {
+  NUEVA
+  EN_PROCESO
+  ATENDIDA
+}
+
+model ContactInquiry {
+  id           String        @id @default(uuid()) @db.Uuid
+  site         Site
+  name         String
+  phone        String
+  email        String?
+  /// Solo en EMPRESAS.
+  company      String?
+  ruc          String?
+  message      String
+  status       InquiryStatus @default(NUEVA)
+  notes        String?
+  assignedTo   User?         @relation("InquiryAssignedTo", fields: [assignedToId], references: [id])
+  assignedToId String?       @db.Uuid
+  /// Cuándo y quién la marcó como atendida; se borran si se reabre.
+  attendedAt   DateTime?
+  attendedBy   User?         @relation("InquiryAttendedBy", fields: [attendedById], references: [id])
+  attendedById String?       @db.Uuid
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@index([site, status, createdAt])
+}
+
+// ─── Contenido de los sitios ───────────────────────────────────────────────
+
+enum MediaProvider {
+  CLOUDINARY
+  /// Solo desarrollo: archivo guardado en la carpeta uploads/ del backend.
+  LOCAL
+}
+
+/// Imagen subida desde el panel (Cloudinary en producción).
+model MediaAsset {
+  id        String        @id @default(uuid()) @db.Uuid
+  provider  MediaProvider @default(CLOUDINARY)
+  publicId  String        @unique
+  url       String
+  width     Int
+  height    Int
+  format    String
+  alt       String        @default("")
+  createdAt DateTime      @default(now())
+
+  companyLogos   CompanyProfile[]
+  carouselSlides CarouselSlide[]
+  socialIcons    SocialLink[]
+  aboutPhotos    AboutPhoto[]
+}
+
+/// Datos de la empresa por sitio (un registro por sitio).
+model CompanyProfile {
+  site            Site        @id
+  name            String
+  shortName       String
+  tagline         String
+  legalName       String
+  ruc             String
+  address         String
+  email           String
+  phone           String
+  phoneDisplay    String
+  mobile          String?
+  mobileDisplay   String?
+  whatsapp        String
+  whatsappDisplay String
+  advisorName     String?
+  website         String
+  logo            MediaAsset? @relation(fields: [logoId], references: [id])
+  logoId          String?     @db.Uuid
+  updatedAt       DateTime    @updatedAt
+}
+
+enum SlideCtaKind {
+  WHATSAPP
+  LINK
+  NONE
+}
+
+model CarouselSlide {
+  id        String       @id @default(uuid()) @db.Uuid
+  site      Site
+  title     String
+  subtitle  String?
+  image     MediaAsset   @relation(fields: [imageId], references: [id])
+  imageId   String       @db.Uuid
+  ctaKind   SlideCtaKind @default(NONE)
+  ctaLabel  String?
+  /// URL si ctaKind = LINK; mensaje de WhatsApp si ctaKind = WHATSAPP.
+  ctaValue  String?
+  position  Int          @default(0)
+  active    Boolean      @default(true)
+  startsAt  DateTime?
+  endsAt    DateTime?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  @@index([site, position])
+}
+
+model Plan {
+  id           String   @id @default(uuid()) @db.Uuid
+  site         Site
+  name         String
+  downloadMbps Int
+  uploadMbps   Int
+  price        Decimal  @db.Decimal(10, 2)
+  promoPrice   Decimal? @db.Decimal(10, 2)
+  promoMonths  Int?
+  badge        String?
+  /// Paquete de TV incluido, p. ej. "TV Digital Premium".
+  tvPackage    String?
+  features     String[]
+  highlighted  Boolean  @default(false)
+  position     Int      @default(0)
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([site, position])
+}
+
+enum SocialNetwork {
+  FACEBOOK
+  INSTAGRAM
+  TIKTOK
+  YOUTUBE
+  LINKEDIN
+  X
+  OTRA
+}
+
+model SocialLink {
+  id        String        @id @default(uuid()) @db.Uuid
+  site      Site
+  network   SocialNetwork
+  label     String
+  url       String
+  /// Ícono personalizado; si es null, la landing usa el ícono predefinido de la red.
+  icon      MediaAsset?   @relation(fields: [iconId], references: [id])
+  iconId    String?       @db.Uuid
+  position  Int           @default(0)
+  active    Boolean       @default(true)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@index([site, position])
+}
+
+enum AboutCategory {
+  EQUIPO
+  PROYECTOS
+  OFICINAS
+  ACTIVIDADES
+}
+
+model AboutPhoto {
+  id        String        @id @default(uuid()) @db.Uuid
+  site      Site
+  image     MediaAsset    @relation(fields: [imageId], references: [id])
+  imageId   String        @db.Uuid
+  category  AboutCategory @default(PROYECTOS)
+  caption   String?
+  position  Int           @default(0)
+  active    Boolean       @default(true)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@index([site, position])
+}
+
+/// Zona del mapa de cobertura (en Hogar, un distrito con fibra activa).
+model CoverageZone {
+  id        String   @id @default(uuid()) @db.Uuid
+  site      Site
+  name      String
+  /// Nota corta que se muestra al elegir la zona, p. ej. "Distrito completo".
+  detail    String?
+  /// Color del contorno en el mapa (hex de la paleta del panel).
+  color     String
+  /// Contorno en [lat, lng]: un anillo por parte del distrito (sin huecos).
+  rings     Json
+  /// Relación de OpenStreetMap de donde salió el contorno, p. ej. "relation/1887817".
+  osmRef    String?
+  position  Int      @default(0)
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([site, position])
+}
+
+// ─── Publicación ───────────────────────────────────────────────────────────
+
+/// Estado de publicación de cada sitio: si hay cambios de contenido sin publicar en la landing.
+model SitePublication {
+  site             Site      @id
+  contentUpdatedAt DateTime  @default(now())
+  publishedAt      DateTime?
+  publishedBy      User?     @relation("SitePublishedBy", fields: [publishedById], references: [id])
+  publishedById    String?   @db.Uuid
+  /// Contenido tal como quedó publicado: permite descartar los cambios sin publicar.
+  snapshot         Json?
+}
+
+/// Bitácora de cambios de contenido: alimenta la lista "qué se va a publicar".
+model ContentChange {
+  id         String        @id @default(uuid()) @db.Uuid
+  site       Site
+  /// Sección: Empresa, Plan, Carrusel, Red social, Foto.
+  entity     String
+  /// Elemento afectado, p. ej. "1000 Mbps".
+  label      String
+  action     ContentAction
+  /// Tabla del elemento (companyProfile, plan, carouselSlide, socialLink, aboutPhoto, coverageZone): permite
+  /// deshacer el cambio por separado. Null en registros anteriores a esa función.
+  collection String?
+  /// Elemento afectado; null para los datos de la empresa y para un cambio de orden.
+  entityId   String?       @db.Uuid
+  at         DateTime      @default(now())
+
+  @@index([site, at])
+}
+
+enum ContentAction {
+  CREADO
+  EDITADO
+  ELIMINADO
+  REORDENADO
+}

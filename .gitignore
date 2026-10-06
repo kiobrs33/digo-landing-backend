@@ -1,0 +1,12 @@
+node_modules
+dist
+coverage
+
+# Variables de entorno
+.env
+
+# Cliente generado por Prisma
+/src/generated
+
+# Imágenes del modo local (sin Cloudinary)
+/uploads

@@ -1,0 +1,26 @@
+# Servicios locales de desarrollo. En producción, Postgres lo provee Easypanel.
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: digo_landing_db
+    restart: unless-stopped
+    ports:
+      - '5433:5432'
+    environment:
+      POSTGRES_USER: digo
+      POSTGRES_PASSWORD: digo
+      POSTGRES_DB: digo_landing
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  # Bandeja de correo falsa: captura todo lo que envía el backend (UI en http://localhost:8025).
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: digo_landing_mail
+    restart: unless-stopped
+    ports:
+      - '1025:1025'
+      - '8025:8025'
+
+volumes:
+  pgdata:
