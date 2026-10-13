@@ -28,6 +28,10 @@ export type Env = {
   WHATSAPP_PHONE_NUMBER_ID: string;
   WHATSAPP_BUSINESS_ID: string;
   WHATSAPP_TOKEN: string;
+  /** WhatsApp Cloud API (Meta) de Speednet: envíos masivos. */
+  SPEEDNET_WHATSAPP_PHONE_NUMBER_ID: string;
+  SPEEDNET_WHATSAPP_BUSINESS_ID: string;
+  SPEEDNET_WHATSAPP_TOKEN: string;
 };
 
 const required = [
@@ -90,5 +94,8 @@ export function validateEnv(raw: Record<string, unknown>): Env {
     WHATSAPP_PHONE_NUMBER_ID: str('WHATSAPP_PHONE_NUMBER_ID'),
     WHATSAPP_BUSINESS_ID: str('WHATSAPP_BUSINESS_ID'),
     WHATSAPP_TOKEN: str('WHATSAPP_TOKEN'),
+    SPEEDNET_WHATSAPP_PHONE_NUMBER_ID: str('SPEEDNET_WHATSAPP_PHONE_NUMBER_ID'),
+    SPEEDNET_WHATSAPP_BUSINESS_ID: str('SPEEDNET_WHATSAPP_BUSINESS_ID'),
+    SPEEDNET_WHATSAPP_TOKEN: str('SPEEDNET_WHATSAPP_TOKEN'),
   };
 }

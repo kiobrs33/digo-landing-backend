@@ -28,6 +28,7 @@ import {
   type ParametrosMensaje,
   type Plantilla,
 } from './plantillas.js';
+import type { Cuenta } from './cuentas.js';
 import { WhatsappService } from './whatsapp.service.js';
 
 const COLUMNA_TELEFONO = 'Teléfono';
@@ -52,6 +53,7 @@ type FilaCliente = {
 };
 
 type ArchivoDestinatarios = {
+  cuenta: Cuenta;
   userId: string;
   nombre: string;
   /** Plantilla para la que se subió: sus columnas son las de ese Excel. */
@@ -74,6 +76,7 @@ type Destinatario = {
 
 type Campana = {
   id: string;
+  cuenta: Cuenta;
   plantilla: Plantilla;
   archivo: string;
   estado: 'EN_CURSO' | 'COMPLETADA' | 'CANCELADA';
@@ -104,13 +107,13 @@ export class MensajesService implements OnApplicationShutdown {
     this.apagando = true;
   }
 
-  plantillas(refrescar: boolean) {
-    return this.whatsapp.listarPlantillas(refrescar);
+  plantillas(cuenta: Cuenta, refrescar: boolean) {
+    return this.whatsapp.listarPlantillas(cuenta, refrescar);
   }
 
   /** Excel vacío con las columnas que pide la plantilla, para llenar los destinatarios. */
-  async excelPlantilla(nombre: string, idioma: string) {
-    const plantilla = await this.whatsapp.plantilla(nombre, idioma);
+  async excelPlantilla(cuenta: Cuenta, nombre: string, idioma: string) {
+    const plantilla = await this.whatsapp.plantilla(cuenta, nombre, idioma);
     return {
       archivo: await excelPlantilla(plantilla),
       nombre: `destinatarios_${plantilla.nombre}.xlsx`,
@@ -125,13 +128,18 @@ export class MensajesService implements OnApplicationShutdown {
    * es un cliente con sus propios valores.
    */
   async cargarDestinatarios(
+    cuenta: Cuenta,
     file: Buffer,
     nombre: string,
     plantillaNombre: string,
     idioma: string,
     user: AuthUser,
   ) {
-    const plantilla = await this.whatsapp.plantilla(plantillaNombre, idioma);
+    const plantilla = await this.whatsapp.plantilla(
+      cuenta,
+      plantillaNombre,
+      idioma,
+    );
     const columnaHeader = plantilla.encabezadoConVariable
       ? columnaEncabezado(plantilla)
       : null;
@@ -211,6 +219,7 @@ export class MensajesService implements OnApplicationShutdown {
     this.limpiar();
     const archivoId = randomUUID();
     this.archivos.set(archivoId, {
+      cuenta,
       userId: user.id,
       nombre,
       plantilla,
@@ -235,10 +244,10 @@ export class MensajesService implements OnApplicationShutdown {
     };
   }
 
-  private archivo(id: string, user: AuthUser) {
+  private archivo(cuenta: Cuenta, id: string, user: AuthUser) {
     this.limpiar();
     const archivo = this.archivos.get(id);
-    if (!archivo || archivo.userId !== user.id) {
+    if (!archivo || archivo.userId !== user.id || archivo.cuenta !== cuenta) {
       throw new NotFoundException(
         'El Excel ya no está disponible. Vuelve a subirlo.',
       );
@@ -265,8 +274,12 @@ export class MensajesService implements OnApplicationShutdown {
   // ─── Envíos ───────────────────────────────────────────────────────────────
 
   /** Un mensaje de prueba a un número, con valores fijos. */
-  async prueba(dto: PruebaDto) {
-    const plantilla = await this.whatsapp.plantilla(dto.plantilla, dto.idioma);
+  async prueba(cuenta: Cuenta, dto: PruebaDto) {
+    const plantilla = await this.whatsapp.plantilla(
+      cuenta,
+      dto.plantilla,
+      dto.idioma,
+    );
     const telefono = normalizarTelefono(dto.telefono);
     if (!telefono)
       throw new BadRequestException('Ingresa un celular válido (9 dígitos).');
@@ -274,6 +287,7 @@ export class MensajesService implements OnApplicationShutdown {
     const faltante = validarParametros(plantilla, parametros);
     if (faltante) throw new BadRequestException(faltante);
     const resultado = await this.whatsapp.enviar(
+      cuenta,
       mensajePlantilla(plantilla, telefono, parametros),
       1,
     );
@@ -281,8 +295,8 @@ export class MensajesService implements OnApplicationShutdown {
     return { telefono, messageId: resultado.messageId };
   }
 
-  async crearCampana(dto: CrearCampanaDto, user: AuthUser) {
-    const archivo = this.archivo(dto.archivoId, user);
+  async crearCampana(cuenta: Cuenta, dto: CrearCampanaDto, user: AuthUser) {
+    const archivo = this.archivo(cuenta, dto.archivoId, user);
     const { plantilla } = archivo;
     if (plantilla.nombre !== dto.plantilla || plantilla.idioma !== dto.idioma) {
       throw new BadRequestException(
@@ -307,6 +321,7 @@ export class MensajesService implements OnApplicationShutdown {
 
     const campana: Campana = {
       id: randomUUID(),
+      cuenta,
       plantilla,
       archivo: archivo.nombre,
       estado: 'EN_CURSO',
@@ -342,6 +357,7 @@ export class MensajesService implements OnApplicationShutdown {
       await Promise.all(
         lote.map(async (destinatario) => {
           const resultado = await this.whatsapp.enviar(
+            campana.cuenta,
             mensajePlantilla(
               campana.plantilla,
               destinatario.telefono,
@@ -363,8 +379,8 @@ export class MensajesService implements OnApplicationShutdown {
     }
   }
 
-  cancelar(id: string) {
-    const campana = this.campana(id);
+  cancelar(cuenta: Cuenta, id: string) {
+    const campana = this.campana(cuenta, id);
     if (campana.estado === 'EN_CURSO') {
       campana.estado = 'CANCELADA';
       campana.terminada = new Date();
@@ -373,8 +389,8 @@ export class MensajesService implements OnApplicationShutdown {
   }
 
   /** Vuelve a poner en cola los que fallaron (p. ej. después de corregir el token). */
-  reintentarErrores(id: string) {
-    const campana = this.campana(id);
+  reintentarErrores(cuenta: Cuenta, id: string) {
+    const campana = this.campana(cuenta, id);
     if (campana.estado === 'EN_CURSO') {
       throw new BadRequestException('La campaña todavía está enviando.');
     }
@@ -395,11 +411,11 @@ export class MensajesService implements OnApplicationShutdown {
 
   // ─── Consultas ────────────────────────────────────────────────────────────
 
-  listar({ page, pageSize }: ListarCampanasQueryDto) {
+  listar(cuenta: Cuenta, { page, pageSize }: ListarCampanasQueryDto) {
     this.limpiar();
-    const todas = [...this.campanas.values()].sort(
-      (a, b) => b.creada.getTime() - a.creada.getTime(),
-    );
+    const todas = [...this.campanas.values()]
+      .filter((campana) => campana.cuenta === cuenta)
+      .sort((a, b) => b.creada.getTime() - a.creada.getTime());
     return {
       items: todas.slice((page - 1) * pageSize, page * pageSize).map(resumen),
       total: todas.length,
@@ -408,15 +424,16 @@ export class MensajesService implements OnApplicationShutdown {
     };
   }
 
-  resumen(id: string) {
-    return resumen(this.campana(id));
+  resumen(cuenta: Cuenta, id: string) {
+    return resumen(this.campana(cuenta, id));
   }
 
   destinatarios(
+    cuenta: Cuenta,
     id: string,
     { status, page, pageSize }: ListarDestinatariosQueryDto,
   ) {
-    const filtrados = this.campana(id).destinatarios.filter(
+    const filtrados = this.campana(cuenta, id).destinatarios.filter(
       (d) => !status || d.estado === status,
     );
     return {
@@ -436,8 +453,8 @@ export class MensajesService implements OnApplicationShutdown {
     };
   }
 
-  async excel(id: string) {
-    const campana = this.campana(id);
+  async excel(cuenta: Cuenta, id: string) {
+    const campana = this.campana(cuenta, id);
     const estado: Record<EstadoEnvio, string> = {
       PENDIENTE: 'Pendiente',
       ENVIADO: 'Enviado',
@@ -463,14 +480,14 @@ export class MensajesService implements OnApplicationShutdown {
     );
     return {
       archivo,
-      nombre: `envios_${campana.plantilla.nombre}_${campana.creada.toISOString().slice(0, 10)}.xlsx`,
+      nombre: `envios_${campana.cuenta}_${campana.plantilla.nombre}_${campana.creada.toISOString().slice(0, 10)}.xlsx`,
     };
   }
 
-  private campana(id: string) {
+  private campana(cuenta: Cuenta, id: string) {
     this.limpiar();
     const campana = this.campanas.get(id);
-    if (!campana) {
+    if (!campana || campana.cuenta !== cuenta) {
       throw new NotFoundException(
         'Campaña no encontrada (el historial se borra al reiniciar el servidor).',
       );

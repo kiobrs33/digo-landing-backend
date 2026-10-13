@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Env } from '../../config/env.js';
+import { clavesCuenta, type Cuenta } from './cuentas.js';
 import {
   type Plantilla,
   type PlantillaMeta,
@@ -36,18 +37,21 @@ const espera = (ms: number) =>
 @Injectable()
 export class WhatsappService {
   private readonly logger = new Logger(WhatsappService.name);
-  private plantillas?: { lista: Plantilla[]; expira: number };
+  private readonly plantillas = new Map<
+    Cuenta,
+    { lista: Plantilla[]; expira: number }
+  >();
 
   constructor(private readonly config: ConfigService<Env, true>) {}
 
-  assertConfigured() {
-    const faltan = (
-      [
-        'WHATSAPP_PHONE_NUMBER_ID',
-        'WHATSAPP_BUSINESS_ID',
-        'WHATSAPP_TOKEN',
-      ] as const
-    ).filter((key) => !this.config.get(key, { infer: true }));
+  private valor(cuenta: Cuenta, clave: 'telefono' | 'negocio' | 'token') {
+    return String(this.config.get(clavesCuenta[cuenta][clave]) ?? '');
+  }
+
+  assertConfigured(cuenta: Cuenta) {
+    const faltan = Object.values(clavesCuenta[cuenta]).filter(
+      (key) => !this.config.get(key),
+    );
     if (faltan.length) {
       throw new ServiceUnavailableException(
         `Falta configurar en el servidor: ${faltan.join(', ')}.`,
@@ -55,26 +59,30 @@ export class WhatsappService {
     }
   }
 
-  private get headers() {
+  private headers(cuenta: Cuenta) {
     return {
-      Authorization: `Bearer ${this.config.get('WHATSAPP_TOKEN', { infer: true })}`,
+      Authorization: `Bearer ${this.valor(cuenta, 'token')}`,
       'Content-Type': 'application/json',
     };
   }
 
-  /** Plantillas aprobadas, todas las páginas. */
-  async listarPlantillas(refrescar = false): Promise<Plantilla[]> {
-    this.assertConfigured();
-    if (!refrescar && this.plantillas && this.plantillas.expira > Date.now()) {
-      return this.plantillas.lista;
+  /** Plantillas aprobadas de la cuenta, todas las páginas. */
+  async listarPlantillas(
+    cuenta: Cuenta,
+    refrescar = false,
+  ): Promise<Plantilla[]> {
+    this.assertConfigured(cuenta);
+    const guardadas = this.plantillas.get(cuenta);
+    if (!refrescar && guardadas && guardadas.expira > Date.now()) {
+      return guardadas.lista;
     }
-    const waba = this.config.get('WHATSAPP_BUSINESS_ID', { infer: true });
+    const waba = this.valor(cuenta, 'negocio');
     let url: string | undefined =
       `${GRAPH_URL}/${waba}/message_templates?limit=100&fields=id,name,language,status,category,parameter_format,components`;
     const todas: PlantillaMeta[] = [];
     while (url) {
       const response = await fetch(url, {
-        headers: this.headers,
+        headers: this.headers(cuenta),
         signal: AbortSignal.timeout(TIMEOUT_MS),
       }).catch(() => null);
       const data = (await response?.json().catch(() => null)) as
@@ -95,12 +103,15 @@ export class WhatsappService {
         (a, b) =>
           a.nombre.localeCompare(b.nombre) || a.idioma.localeCompare(b.idioma),
       );
-    this.plantillas = { lista, expira: Date.now() + PLANTILLAS_TTL_MS };
+    this.plantillas.set(cuenta, {
+      lista,
+      expira: Date.now() + PLANTILLAS_TTL_MS,
+    });
     return lista;
   }
 
-  async plantilla(nombre: string, idioma: string) {
-    const plantilla = (await this.listarPlantillas()).find(
+  async plantilla(cuenta: Cuenta, nombre: string, idioma: string) {
+    const plantilla = (await this.listarPlantillas(cuenta)).find(
       (item) => item.nombre === nombre && item.idioma === idioma,
     );
     if (!plantilla) {
@@ -115,15 +126,19 @@ export class WhatsappService {
    * Envía un mensaje. Reintenta solo lo que no llegó a Meta o lo que Meta pide reintentar (límite
    * de velocidad, error del servidor): un error de datos (4xx) no se reintenta para no duplicar.
    */
-  async enviar(cuerpo: unknown, intentos = 3): Promise<ResultadoEnvio> {
-    const url = `${GRAPH_URL}/${this.config.get('WHATSAPP_PHONE_NUMBER_ID', { infer: true })}/messages`;
+  async enviar(
+    cuenta: Cuenta,
+    cuerpo: unknown,
+    intentos = 3,
+  ): Promise<ResultadoEnvio> {
+    const url = `${GRAPH_URL}/${this.valor(cuenta, 'telefono')}/messages`;
     let ultimo: ResultadoEnvio = {
       ok: false,
       error: 'Sin respuesta',
       reintentable: true,
     };
     for (let intento = 1; intento <= intentos; intento++) {
-      ultimo = await this.enviarUnaVez(url, cuerpo);
+      ultimo = await this.enviarUnaVez(cuenta, url, cuerpo);
       if (ultimo.ok || !ultimo.reintentable) return ultimo;
       if (intento < intentos) await espera(1000 * 2 ** (intento - 1));
     }
@@ -131,6 +146,7 @@ export class WhatsappService {
   }
 
   private async enviarUnaVez(
+    cuenta: Cuenta,
     url: string,
     cuerpo: unknown,
   ): Promise<ResultadoEnvio> {
@@ -138,7 +154,7 @@ export class WhatsappService {
     try {
       response = await fetch(url, {
         method: 'POST',
-        headers: this.headers,
+        headers: this.headers(cuenta),
         body: JSON.stringify(cuerpo),
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
