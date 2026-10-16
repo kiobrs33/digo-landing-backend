@@ -4,10 +4,18 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  type OnApplicationBootstrap,
   type OnApplicationShutdown,
 } from '@nestjs/common';
 import type { AuthUser } from '../../auth/auth-user.js';
+import { paginationArgs } from '../../common/pagination.js';
 import { buildXlsx } from '../../common/xlsx.js';
+import type {
+  MensajeCampana,
+  MensajeEnvio,
+  Prisma,
+} from '../../generated/prisma/client.js';
+import { PrismaService } from '../../prisma/prisma.service.js';
 import { readSheet } from '../excel-input.js';
 import type {
   CrearCampanaDto,
@@ -41,8 +49,7 @@ const REVISIONES_FINALES = 5;
 const ESPERA_REVISION_MS = 3000;
 /** Tiempo que el Excel subido queda disponible para crear la campaña. */
 const ARCHIVO_TTL_MS = 60 * 60_000;
-/** Tiempo que una campaña terminada sigue visible (para revisar y descargar el resultado). */
-const CAMPANA_TTL_MS = 24 * 60 * 60_000;
+const DAY_MS = 24 * 60 * 60_000;
 
 /** Un cliente del Excel con los valores de su mensaje y, si lo hay, por qué no se le puede enviar. */
 type FilaCliente = {
@@ -66,55 +73,75 @@ type ArchivoDestinatarios = {
   expira: number;
 };
 
-type Destinatario = {
-  fila: number;
-  telefono: string;
-  nombre: string;
-  parametros: ParametrosMensaje;
-  estado: EstadoEnvio;
-  /** Error de Meta o motivo de omisión. */
-  detalle: string | null;
-  messageId: string | null;
-  enviado: Date | null;
-  /** Por Chatwoot: la conversación y el mensaje que se escribió en ella. */
-  conversacion: number | null;
-  mensajeChatwoot: number | null;
-  /** Por Chatwoot: falta saber si WhatsApp lo aceptó (Chatwoot lo envía en segundo plano). */
-  porConfirmar: boolean;
-};
-
-type Campana = {
+/** Lo que se necesita de la campaña para enviar (se lee una vez de la base). */
+type Contexto = {
   id: string;
   cuenta: Cuenta;
   canal: Canal;
   plantilla: Plantilla;
-  archivo: string;
-  estado: 'EN_CURSO' | 'COMPLETADA' | 'CANCELADA';
-  creadaPor: string;
-  creada: Date;
-  terminada: Date | null;
-  destinatarios: Destinatario[];
 };
+
+/** Plantilla, parámetros y demás objetos simples a una columna JSON. */
+const json = (valor: unknown) => valor as Prisma.InputJsonValue;
+
+/** Las fechas del filtro son días de Lima (UTC−5, sin horario de verano). */
+const diaLima = (dia: string) => new Date(`${dia.slice(0, 10)}T00:00:00-05:00`);
 
 const espera = (ms: number) =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Envíos masivos de WhatsApp. Herramienta temporal: las campañas viven en la memoria del
- * servidor (no en la base de datos de las landings). Siguen aunque se cierre el panel, pero un
- * reinicio del servidor detiene las que estén en curso y borra el historial.
+ * Envíos masivos de WhatsApp. Las campañas y el resultado de cada cliente se guardan en la base:
+ * siguen aunque se cierre el panel y, si el servidor se reinicia, las que estaban en curso se
+ * retoman con los pendientes (sin repetir los ya enviados). El Excel subido, en cambio, vive en
+ * memoria hasta que se crea la campaña.
  */
 @Injectable()
-export class MensajesService implements OnApplicationShutdown {
+export class MensajesService
+  implements OnApplicationBootstrap, OnApplicationShutdown
+{
   private readonly logger = new Logger(MensajesService.name);
   private readonly archivos = new Map<string, ArchivoDestinatarios>();
-  private readonly campanas = new Map<string, Campana>();
+  /** Campañas que este proceso está enviando (para no lanzar la misma dos veces). */
+  private readonly activas = new Set<string>();
   private apagando = false;
 
   constructor(
+    private readonly prisma: PrismaService,
     private readonly whatsapp: WhatsappService,
     private readonly chatwoot: ChatwootService,
   ) {}
+
+  /** Retoma las campañas que quedaron en curso al apagarse o caerse el servidor. */
+  async onApplicationBootstrap() {
+    try {
+      const enCurso = await this.prisma.mensajeCampana.findMany({
+        where: { estado: 'EN_CURSO' },
+        select: { id: true },
+      });
+      for (const { id } of enCurso) {
+        // Los que se estaban enviando en ese momento pudieron llegar: no se reenvían solos.
+        await this.prisma.mensajeEnvio.updateMany({
+          where: {
+            campanaId: id,
+            estado: 'PENDIENTE',
+            intentadoAt: { not: null },
+          },
+          data: {
+            estado: 'ERROR',
+            detalle:
+              'El servidor se reinició mientras se enviaba: revisa si llegó antes de reintentar.',
+          },
+        });
+        this.logger.log(`Retomando la campaña ${id}`);
+        this.iniciar(id);
+      }
+    } catch (error) {
+      this.logger.error(
+        `No se pudieron retomar las campañas: ${String(error)}`,
+      );
+    }
+  }
 
   onApplicationShutdown() {
     this.apagando = true;
@@ -268,19 +295,11 @@ export class MensajesService implements OnApplicationShutdown {
     return archivo;
   }
 
-  /** Borra los Excel vencidos y las campañas terminadas hace más de un día. */
+  /** Borra los Excel subidos que vencieron sin crear la campaña. */
   private limpiar() {
     const ahora = Date.now();
     for (const [id, archivo] of this.archivos) {
       if (archivo.expira < ahora) this.archivos.delete(id);
-    }
-    for (const [id, campana] of this.campanas) {
-      if (
-        campana.terminada &&
-        campana.terminada.getTime() + CAMPANA_TTL_MS < ahora
-      ) {
-        this.campanas.delete(id);
-      }
     }
   }
 
@@ -358,143 +377,180 @@ export class MensajesService implements OnApplicationShutdown {
     if (canal === 'CHATWOOT') {
       await this.chatwoot.assertPlantilla(cuenta, plantilla);
     }
-    const destinatarios = archivo.clientes.map((cliente): Destinatario => ({
-      fila: cliente.fila,
-      telefono: cliente.telefono,
-      nombre: cliente.nombre,
-      parametros: cliente.parametros,
-      estado: cliente.problema ? 'OMITIDO' : 'PENDIENTE',
-      detalle: cliente.problema,
-      messageId: null,
-      enviado: null,
-      conversacion: null,
-      mensajeChatwoot: null,
-      porConfirmar: false,
-    }));
-    if (!destinatarios.some((d) => d.estado === 'PENDIENTE')) {
+    if (archivo.clientes.every((cliente) => cliente.problema)) {
       throw new BadRequestException(
         'Ningún cliente tiene celular válido y todos sus datos.',
       );
     }
 
-    const campana: Campana = {
-      id: randomUUID(),
-      cuenta,
-      canal,
-      plantilla,
-      archivo: archivo.nombre,
-      estado: 'EN_CURSO',
-      creadaPor: user.name,
-      creada: new Date(),
-      terminada: null,
-      destinatarios,
-    };
-    this.campanas.set(campana.id, campana);
-    this.archivos.delete(dto.archivoId);
-    this.iniciar(campana);
-    return resumen(campana);
-  }
-
-  private iniciar(campana: Campana) {
-    this.procesar(campana).catch((error: unknown) => {
-      this.logger.error(`Campaña ${campana.id}: ${String(error)}`);
-      campana.estado = 'CANCELADA';
-      campana.terminada = new Date();
+    const campana = await this.prisma.mensajeCampana.create({
+      data: {
+        cuenta,
+        canal,
+        plantillaNombre: plantilla.nombre,
+        idioma: plantilla.idioma,
+        plantilla: json(plantilla),
+        archivo: archivo.nombre,
+        creadaPorId: user.id,
+        creadaPorNombre: user.name,
+        envios: {
+          createMany: {
+            data: archivo.clientes.map((cliente) => ({
+              fila: cliente.fila,
+              telefono: cliente.telefono,
+              nombre: cliente.nombre,
+              parametros: json(cliente.parametros),
+              estado: cliente.problema ? 'OMITIDO' : 'PENDIENTE',
+              detalle: cliente.problema,
+            })),
+          },
+        },
+      },
     });
+    this.archivos.delete(dto.archivoId);
+    this.iniciar(campana.id);
+    return this.resumen(cuenta, campana.id);
   }
 
-  private async procesar(campana: Campana) {
-    while (!this.apagando && campana.estado === 'EN_CURSO') {
-      const lote = campana.destinatarios
-        .filter((d) => d.estado === 'PENDIENTE')
-        .slice(0, LOTE);
+  private iniciar(id: string) {
+    if (this.activas.has(id)) return;
+    this.activas.add(id);
+    this.procesar(id)
+      .catch(async (error: unknown) => {
+        this.logger.error(`Campaña ${id}: ${String(error)}`);
+        await this.prisma.mensajeCampana
+          .updateMany({
+            where: { id, estado: 'EN_CURSO' },
+            data: { estado: 'CANCELADA', terminadaAt: new Date() },
+          })
+          .catch(() => undefined);
+      })
+      .finally(() => this.activas.delete(id));
+  }
+
+  /** Envía por lotes los pendientes, en orden de fila, hasta terminar o hasta que la detengan. */
+  private async procesar(id: string) {
+    const campana = await this.prisma.mensajeCampana.findUniqueOrThrow({
+      where: { id },
+    });
+    const contexto: Contexto = {
+      id,
+      cuenta: campana.cuenta as Cuenta,
+      canal: campana.canal,
+      plantilla: campana.plantilla as unknown as Plantilla,
+    };
+    while (!this.apagando) {
+      const { estado } = await this.prisma.mensajeCampana.findUniqueOrThrow({
+        where: { id },
+        select: { estado: true },
+      });
+      const lote =
+        estado === 'EN_CURSO'
+          ? await this.prisma.mensajeEnvio.findMany({
+              where: { campanaId: id, estado: 'PENDIENTE' },
+              orderBy: { fila: 'asc' },
+              take: LOTE,
+            })
+          : [];
       if (!lote.length) {
-        if (campana.canal === 'CHATWOOT') await this.confirmarFinal(campana);
-        campana.estado = 'COMPLETADA';
-        campana.terminada = new Date();
+        if (contexto.canal === 'CHATWOOT') await this.confirmarFinal(contexto);
+        await this.prisma.mensajeCampana.updateMany({
+          where: { id, estado: 'EN_CURSO' },
+          data: { estado: 'COMPLETADA', terminadaAt: new Date() },
+        });
         return;
       }
-      await Promise.all(
-        lote.map((destinatario) => this.enviarA(campana, destinatario)),
-      );
+      await this.prisma.mensajeEnvio.updateMany({
+        where: { id: { in: lote.map((envio) => envio.id) } },
+        data: { intentadoAt: new Date() },
+      });
+      await Promise.all(lote.map((envio) => this.enviarA(contexto, envio)));
       await espera(PAUSA_MS);
-      if (campana.canal === 'CHATWOOT') {
-        await this.confirmar(campana, ESPERA_REVISION_MS);
+      if (contexto.canal === 'CHATWOOT') {
+        await this.confirmar(contexto, ESPERA_REVISION_MS);
       }
     }
   }
 
-  private async enviarA(campana: Campana, destinatario: Destinatario) {
-    if (campana.canal === 'CHATWOOT') {
+  private async enviarA(contexto: Contexto, envio: MensajeEnvio) {
+    const parametros = envio.parametros as unknown as ParametrosMensaje;
+    if (contexto.canal === 'CHATWOOT') {
       const resultado = await this.chatwoot.enviar(
-        campana.cuenta,
-        campana.plantilla,
-        destinatario.telefono,
-        destinatario.nombre,
-        destinatario.parametros,
+        contexto.cuenta,
+        contexto.plantilla,
+        envio.telefono,
+        envio.nombre,
+        parametros,
       );
-      if (resultado.ok) {
-        destinatario.estado = 'ENVIADO';
-        destinatario.conversacion = resultado.conversacionId;
-        destinatario.mensajeChatwoot = resultado.mensajeId;
-        destinatario.porConfirmar = true;
-        destinatario.enviado = new Date();
-        destinatario.detalle = null;
-      } else {
-        destinatario.estado = 'ERROR';
-        destinatario.detalle = resultado.error;
-      }
+      await this.prisma.mensajeEnvio.update({
+        where: { id: envio.id },
+        data: resultado.ok
+          ? {
+              estado: 'ENVIADO',
+              conversacionId: resultado.conversacionId,
+              mensajeChatwootId: resultado.mensajeId,
+              porConfirmar: true,
+              enviadoAt: new Date(),
+              detalle: null,
+            }
+          : { estado: 'ERROR', detalle: resultado.error },
+      });
       return;
     }
     const resultado = await this.whatsapp.enviar(
-      campana.cuenta,
-      mensajePlantilla(
-        campana.plantilla,
-        destinatario.telefono,
-        destinatario.parametros,
-      ),
+      contexto.cuenta,
+      mensajePlantilla(contexto.plantilla, envio.telefono, parametros),
     );
-    if (resultado.ok) {
-      destinatario.estado = 'ENVIADO';
-      destinatario.messageId = resultado.messageId;
-      destinatario.enviado = new Date();
-      destinatario.detalle = null;
-    } else {
-      destinatario.estado = 'ERROR';
-      destinatario.detalle = resultado.error;
-    }
+    await this.prisma.mensajeEnvio.update({
+      where: { id: envio.id },
+      data: resultado.ok
+        ? {
+            estado: 'ENVIADO',
+            messageId: resultado.messageId,
+            enviadoAt: new Date(),
+            detalle: null,
+          }
+        : { estado: 'ERROR', detalle: resultado.error },
+    });
   }
 
   /**
    * Chatwoot pasa los mensajes a WhatsApp en segundo plano: se revisa cada uno enviado hace al
    * menos `antiguedadMs` y se marca como error si Meta lo rechazó.
    */
-  private async confirmar(campana: Campana, antiguedadMs: number) {
-    const ahora = Date.now();
-    const porRevisar = campana.destinatarios.filter(
-      (d) =>
-        d.porConfirmar &&
-        d.conversacion !== null &&
-        d.enviado &&
-        ahora - d.enviado.getTime() >= antiguedadMs,
-    );
+  private async confirmar(contexto: Contexto, antiguedadMs: number) {
+    const porRevisar = await this.prisma.mensajeEnvio.findMany({
+      where: {
+        campanaId: contexto.id,
+        porConfirmar: true,
+        conversacionId: { not: null },
+        enviadoAt: { lte: new Date(Date.now() - antiguedadMs) },
+      },
+    });
     for (let inicio = 0; inicio < porRevisar.length; inicio += LOTE) {
       await Promise.all(
-        porRevisar.slice(inicio, inicio + LOTE).map(async (destinatario) => {
+        porRevisar.slice(inicio, inicio + LOTE).map(async (envio) => {
           const estado = await this.chatwoot
             .estado(
-              campana.cuenta,
-              destinatario.conversacion!,
-              destinatario.mensajeChatwoot,
+              contexto.cuenta,
+              envio.conversacionId!,
+              envio.mensajeChatwootId,
             )
             .catch(() => null);
           if (estado?.estado === 'ENVIADO') {
-            destinatario.porConfirmar = false;
-            destinatario.messageId = estado.wamid;
+            await this.prisma.mensajeEnvio.update({
+              where: { id: envio.id },
+              data: { porConfirmar: false, messageId: estado.wamid },
+            });
           } else if (estado?.estado === 'ERROR') {
-            destinatario.porConfirmar = false;
-            destinatario.estado = 'ERROR';
-            destinatario.detalle = estado.error;
+            await this.prisma.mensajeEnvio.update({
+              where: { id: envio.id },
+              data: {
+                porConfirmar: false,
+                estado: 'ERROR',
+                detalle: estado.error,
+              },
+            });
           }
         }),
       );
@@ -502,104 +558,172 @@ export class MensajesService implements OnApplicationShutdown {
   }
 
   /** Al terminar, unas revisiones más para los que Chatwoot aún no había enviado. */
-  private async confirmarFinal(campana: Campana) {
+  private async confirmarFinal(contexto: Contexto) {
+    const quedan = () =>
+      this.prisma.mensajeEnvio.count({
+        where: { campanaId: contexto.id, porConfirmar: true },
+      });
     for (let vez = 0; vez < REVISIONES_FINALES; vez++) {
-      if (!campana.destinatarios.some((d) => d.porConfirmar)) return;
+      if (!(await quedan())) return;
       await espera(ESPERA_REVISION_MS);
-      await this.confirmar(campana, 0);
+      await this.confirmar(contexto, 0);
     }
-    for (const destinatario of campana.destinatarios) {
-      if (destinatario.porConfirmar) {
-        destinatario.porConfirmar = false;
-        destinatario.detalle =
-          'Chatwoot aún no confirmaba el envío a WhatsApp: revisa la conversación.';
-      }
-    }
+    await this.prisma.mensajeEnvio.updateMany({
+      where: { campanaId: contexto.id, porConfirmar: true },
+      data: {
+        porConfirmar: false,
+        detalle:
+          'Chatwoot aún no confirmaba el envío a WhatsApp: revisa la conversación.',
+      },
+    });
   }
 
-  cancelar(cuenta: Cuenta, id: string) {
-    const campana = this.campana(cuenta, id);
-    if (campana.estado === 'EN_CURSO') {
-      campana.estado = 'CANCELADA';
-      campana.terminada = new Date();
-    }
-    return resumen(campana);
+  async cancelar(cuenta: Cuenta, id: string) {
+    await this.campana(cuenta, id);
+    await this.prisma.mensajeCampana.updateMany({
+      where: { id, estado: 'EN_CURSO' },
+      data: { estado: 'CANCELADA', terminadaAt: new Date() },
+    });
+    return this.resumen(cuenta, id);
   }
 
   /** Vuelve a poner en cola los que fallaron (p. ej. después de corregir el token). */
-  reintentarErrores(cuenta: Cuenta, id: string) {
-    const campana = this.campana(cuenta, id);
-    if (campana.estado === 'EN_CURSO') {
+  async reintentarErrores(cuenta: Cuenta, id: string) {
+    const campana = await this.campana(cuenta, id);
+    if (campana.estado === 'EN_CURSO' || this.activas.has(id)) {
       throw new BadRequestException('La campaña todavía está enviando.');
     }
-    let pendientes = 0;
-    for (const destinatario of campana.destinatarios) {
-      if (destinatario.estado === 'ERROR') {
-        destinatario.estado = 'PENDIENTE';
-        destinatario.detalle = null;
-        pendientes++;
-      }
-    }
-    if (!pendientes) throw new BadRequestException('No hay envíos con error.');
-    campana.estado = 'EN_CURSO';
-    campana.terminada = null;
-    this.iniciar(campana);
-    return resumen(campana);
+    const { count } = await this.prisma.mensajeEnvio.updateMany({
+      where: { campanaId: id, estado: 'ERROR' },
+      data: {
+        estado: 'PENDIENTE',
+        detalle: null,
+        intentadoAt: null,
+        porConfirmar: false,
+      },
+    });
+    if (!count) throw new BadRequestException('No hay envíos con error.');
+    await this.prisma.mensajeCampana.update({
+      where: { id },
+      data: { estado: 'EN_CURSO', terminadaAt: null },
+    });
+    this.iniciar(id);
+    return this.resumen(cuenta, id);
   }
 
   // ─── Consultas ────────────────────────────────────────────────────────────
 
-  listar(cuenta: Cuenta, { page, pageSize }: ListarCampanasQueryDto) {
-    this.limpiar();
-    const todas = [...this.campanas.values()]
-      .filter((campana) => campana.cuenta === cuenta)
-      .sort((a, b) => b.creada.getTime() - a.creada.getTime());
+  async listar(cuenta: Cuenta, query: ListarCampanasQueryDto) {
+    const buscar = query.buscar?.trim();
+    const where: Prisma.MensajeCampanaWhereInput = {
+      cuenta,
+      createdAt:
+        query.desde || query.hasta
+          ? {
+              gte: query.desde ? diaLima(query.desde) : undefined,
+              lt: query.hasta
+                ? new Date(diaLima(query.hasta).getTime() + DAY_MS)
+                : undefined,
+            }
+          : undefined,
+      OR: buscar
+        ? [
+            { plantillaNombre: { contains: buscar, mode: 'insensitive' } },
+            { archivo: { contains: buscar, mode: 'insensitive' } },
+            { creadaPorNombre: { contains: buscar, mode: 'insensitive' } },
+          ]
+        : undefined,
+    };
+    const [campanas, total] = await Promise.all([
+      this.prisma.mensajeCampana.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        ...paginationArgs(query),
+      }),
+      this.prisma.mensajeCampana.count({ where }),
+    ]);
+    const conteos = await this.conteos(campanas.map((campana) => campana.id));
     return {
-      items: todas.slice((page - 1) * pageSize, page * pageSize).map(resumen),
-      total: todas.length,
-      page,
-      pageSize,
+      items: campanas.map((campana) => resumen(campana, conteos)),
+      total,
+      page: query.page,
+      pageSize: query.pageSize,
     };
   }
 
-  resumen(cuenta: Cuenta, id: string) {
-    return resumen(this.campana(cuenta, id));
+  async resumen(cuenta: Cuenta, id: string) {
+    const campana = await this.campana(cuenta, id);
+    return resumen(campana, await this.conteos([id]));
   }
 
-  destinatarios(
+  /** Clientes por estado de cada campaña. */
+  private async conteos(ids: string[]) {
+    const filas = ids.length
+      ? await this.prisma.mensajeEnvio.groupBy({
+          by: ['campanaId', 'estado'],
+          where: { campanaId: { in: ids } },
+          _count: { _all: true },
+        })
+      : [];
+    const conteos = new Map<string, Record<EstadoEnvio, number>>();
+    for (const fila of filas) {
+      const actual = conteos.get(fila.campanaId) ?? {
+        PENDIENTE: 0,
+        ENVIADO: 0,
+        ERROR: 0,
+        OMITIDO: 0,
+      };
+      actual[fila.estado] = fila._count._all;
+      conteos.set(fila.campanaId, actual);
+    }
+    return conteos;
+  }
+
+  async destinatarios(
     cuenta: Cuenta,
     id: string,
     { status, page, pageSize }: ListarDestinatariosQueryDto,
   ) {
-    const filtrados = this.campana(cuenta, id).destinatarios.filter(
-      (d) => !status || d.estado === status,
-    );
+    await this.campana(cuenta, id);
+    const where = { campanaId: id, estado: status };
+    const [envios, total] = await Promise.all([
+      this.prisma.mensajeEnvio.findMany({
+        where,
+        orderBy: { fila: 'asc' },
+        ...paginationArgs({ page, pageSize }),
+      }),
+      this.prisma.mensajeEnvio.count({ where }),
+    ]);
     return {
-      items: filtrados
-        .slice((page - 1) * pageSize, page * pageSize)
-        .map(({ fila, telefono, nombre, estado, detalle, enviado }) => ({
+      items: envios.map(
+        ({ fila, telefono, nombre, estado, detalle, enviadoAt }) => ({
           fila,
           telefono,
           nombre,
           estado,
           detalle,
-          enviado,
-        })),
-      total: filtrados.length,
+          enviado: enviadoAt,
+        }),
+      ),
+      total,
       page,
       pageSize,
     };
   }
 
   async excel(cuenta: Cuenta, id: string) {
-    const campana = this.campana(cuenta, id);
+    const campana = await this.campana(cuenta, id);
+    const envios = await this.prisma.mensajeEnvio.findMany({
+      where: { campanaId: id },
+      orderBy: { fila: 'asc' },
+    });
     const estado: Record<EstadoEnvio, string> = {
       PENDIENTE: 'Pendiente',
       ENVIADO: 'Enviado',
       ERROR: 'Error',
       OMITIDO: 'Omitido',
     };
-    const archivo = await buildXlsx<Destinatario>(
+    const archivo = await buildXlsx<MensajeEnvio>(
       'Envíos',
       [
         {
@@ -612,39 +736,41 @@ export class MensajesService implements OnApplicationShutdown {
         { header: 'Teléfono', width: 14, value: (d) => d.telefono },
         { header: 'Resultado', width: 12, value: (d) => estado[d.estado] },
         { header: 'Detalle', width: 50, kind: 'text', value: (d) => d.detalle },
-        { header: 'Enviado', width: 18, kind: 'date', value: (d) => d.enviado },
+        {
+          header: 'Enviado',
+          width: 18,
+          kind: 'date',
+          value: (d) => d.enviadoAt,
+        },
         ...(campana.canal === 'CHATWOOT'
           ? [
               {
                 header: 'Conversación en Chatwoot',
                 width: 60,
-                value: (d: Destinatario) =>
-                  d.conversacion === null
+                value: (d: MensajeEnvio) =>
+                  d.conversacionId === null
                     ? null
                     : this.chatwoot.enlaceConversacion(
-                        campana.cuenta,
-                        d.conversacion,
+                        cuenta,
+                        d.conversacionId,
                       ),
               },
             ]
           : []),
       ],
-      campana.destinatarios,
+      envios,
     );
     return {
       archivo,
-      nombre: `envios_${campana.cuenta}${campana.canal === 'CHATWOOT' ? '_chatwoot' : ''}_${campana.plantilla.nombre}_${campana.creada.toISOString().slice(0, 10)}.xlsx`,
+      nombre: `envios_${cuenta}${campana.canal === 'CHATWOOT' ? '_chatwoot' : ''}_${campana.plantillaNombre}_${campana.createdAt.toISOString().slice(0, 10)}.xlsx`,
     };
   }
 
-  private campana(cuenta: Cuenta, id: string) {
-    this.limpiar();
-    const campana = this.campanas.get(id);
-    if (!campana || campana.cuenta !== cuenta) {
-      throw new NotFoundException(
-        'Campaña no encontrada (el historial se borra al reiniciar el servidor).',
-      );
-    }
+  private async campana(cuenta: Cuenta, id: string) {
+    const campana = await this.prisma.mensajeCampana.findFirst({
+      where: { id, cuenta },
+    });
+    if (!campana) throw new NotFoundException('Campaña no encontrada.');
     return campana;
   }
 }
@@ -662,23 +788,30 @@ function validarParametros(
   return vacia >= 0 ? `Variable {{${plantilla.variables[vacia]}}} vacía` : '';
 }
 
-function resumen(campana: Campana) {
-  const contar = (estado: EstadoEnvio) =>
-    campana.destinatarios.filter((d) => d.estado === estado).length;
+function resumen(
+  campana: MensajeCampana,
+  conteos: Map<string, Record<EstadoEnvio, number>>,
+) {
+  const cuenta = conteos.get(campana.id) ?? {
+    PENDIENTE: 0,
+    ENVIADO: 0,
+    ERROR: 0,
+    OMITIDO: 0,
+  };
   return {
     id: campana.id,
     canal: campana.canal,
-    plantilla: campana.plantilla.nombre,
-    idioma: campana.plantilla.idioma,
+    plantilla: campana.plantillaNombre,
+    idioma: campana.idioma,
     archivo: campana.archivo,
     estado: campana.estado,
-    creada: campana.creada,
-    terminada: campana.terminada,
-    creadaPor: campana.creadaPor,
-    total: campana.destinatarios.length,
-    pendientes: contar('PENDIENTE'),
-    enviados: contar('ENVIADO'),
-    errores: contar('ERROR'),
-    omitidos: contar('OMITIDO'),
+    creada: campana.createdAt,
+    terminada: campana.terminadaAt,
+    creadaPor: campana.creadaPorNombre,
+    total: cuenta.PENDIENTE + cuenta.ENVIADO + cuenta.ERROR + cuenta.OMITIDO,
+    pendientes: cuenta.PENDIENTE,
+    enviados: cuenta.ENVIADO,
+    errores: cuenta.ERROR,
+    omitidos: cuenta.OMITIDO,
   };
 }

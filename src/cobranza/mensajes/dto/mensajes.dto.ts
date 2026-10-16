@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsArray,
+  IsDateString,
   IsIn,
   IsOptional,
   IsString,
@@ -70,7 +71,27 @@ export class PruebaDto extends ConCanalDto {
   encabezado?: string;
 }
 
-export class ListarCampanasQueryDto extends PaginationQueryDto {}
+export class ListarCampanasQueryDto extends PaginationQueryDto {
+  @ApiPropertyOptional({
+    description: 'Busca por plantilla, nombre del Excel o quién lo envió',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  buscar?: string;
+
+  @ApiPropertyOptional({ description: 'Enviadas desde (AAAA-MM-DD)' })
+  @IsOptional()
+  @IsDateString()
+  desde?: string;
+
+  @ApiPropertyOptional({
+    description: 'Enviadas hasta, inclusive (AAAA-MM-DD)',
+  })
+  @IsOptional()
+  @IsDateString()
+  hasta?: string;
+}
 
 export class ListarDestinatariosQueryDto extends PaginationQueryDto {
   @ApiPropertyOptional({ enum: ESTADOS_ENVIO })

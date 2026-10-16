@@ -41,6 +41,7 @@ model User {
   assignedInquiries  ContactInquiry[]  @relation("InquiryAssignedTo")
   attendedInquiries  ContactInquiry[]  @relation("InquiryAttendedBy")
   publications       SitePublication[] @relation("SitePublishedBy")
+  campanasMensajes   MensajeCampana[]
 }
 
 // ─── Libro de Reclamaciones ────────────────────────────────────────────────
@@ -364,4 +365,80 @@ enum ContentAction {
   EDITADO
   ELIMINADO
   REORDENADO
+}
+
+// ─── Mensajes masivos de WhatsApp ──────────────────────────────────────────
+
+enum CanalMensaje {
+  WHATSAPP // directo a la Cloud API de Meta
+  CHATWOOT // por la bandeja de WhatsApp de Chatwoot (queda como conversación)
+}
+
+enum EstadoCampana {
+  EN_CURSO
+  COMPLETADA
+  CANCELADA
+}
+
+enum EstadoEnvio {
+  PENDIENTE
+  ENVIADO
+  ERROR
+  OMITIDO // sin celular válido o con un dato vacío: nunca se intentó
+}
+
+/// Envío masivo de una plantilla a los clientes de un Excel. Un reinicio del servidor retoma los
+/// que quedaron en curso.
+model MensajeCampana {
+  id              String        @id @default(uuid()) @db.Uuid
+  /// Cuenta de WhatsApp: "digo" o "speednet".
+  cuenta          String
+  canal           CanalMensaje
+  plantillaNombre String
+  idioma          String
+  /// La plantilla tal como estaba al enviar (cuerpo, variables, encabezado): para reintentar igual.
+  plantilla       Json
+  /// Nombre del Excel de clientes.
+  archivo         String
+  estado          EstadoCampana @default(EN_CURSO)
+  creadaPor       User?         @relation(fields: [creadaPorId], references: [id], onDelete: SetNull)
+  creadaPorId     String?       @db.Uuid
+  /// Nombre de quien la envió (se conserva aunque se borre el usuario).
+  creadaPorNombre String
+  createdAt       DateTime      @default(now())
+  terminadaAt     DateTime?
+
+  envios MensajeEnvio[]
+
+  @@index([cuenta, createdAt])
+}
+
+/// Un cliente de la campaña: sus datos del Excel y qué pasó con su mensaje.
+model MensajeEnvio {
+  id                String         @id @default(uuid()) @db.Uuid
+  campana           MensajeCampana @relation(fields: [campanaId], references: [id], onDelete: Cascade)
+  campanaId         String         @db.Uuid
+  /// Fila del Excel.
+  fila              Int
+  /// Celular en formato internacional; vacío si el del Excel no era válido.
+  telefono          String
+  nombre            String
+  /// Valores del mensaje: `{ encabezado?, cuerpo: string[] }`.
+  parametros        Json
+  estado            EstadoEnvio    @default(PENDIENTE)
+  /// Error de Meta o Chatwoot, o motivo de omisión.
+  detalle           String?
+  /// Id del mensaje en WhatsApp (wamid).
+  messageId         String?
+  /// Por Chatwoot: conversación y mensaje que se escribió en ella.
+  conversacionId    Int?
+  mensajeChatwootId Int?
+  /// Por Chatwoot: falta saber si WhatsApp lo aceptó.
+  porConfirmar      Boolean        @default(false)
+  /// Se empezó a enviar: si el servidor se reinicia antes de saber el resultado, no se reenvía solo.
+  intentadoAt       DateTime?
+  enviadoAt         DateTime?
+
+  @@index([campanaId, estado])
+  @@index([campanaId, fila])
 }
