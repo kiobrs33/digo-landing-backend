@@ -17,8 +17,8 @@ export const limaExcelDate = (date: Date) =>
   new Date(date.getTime() - 5 * 60 * 60 * 1000);
 
 /**
- * Libro de una hoja con el estilo del panel: encabezado azul de la marca fijo al desplazarse,
- * filtros de Excel en cada columna y fechas reales (se ordenan y filtran como fecha).
+ * Libro de una hoja con el estilo del panel: encabezado azul de la marca, filtros de Excel en
+ * cada columna y fechas reales (se ordenan y filtran como fecha).
  */
 export async function buildXlsx<Row>(
   sheetName: string,
@@ -28,9 +28,7 @@ export async function buildXlsx<Row>(
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'Panel Digo';
   workbook.created = new Date();
-  const sheet = workbook.addWorksheet(sheetName, {
-    views: [{ state: 'frozen', ySplit: 1 }],
-  });
+  const sheet = workbook.addWorksheet(sheetName);
   sheet.columns = columns.map((column, index) => ({
     header: column.header,
     key: String(index),
@@ -60,14 +58,17 @@ export async function buildXlsx<Row>(
     );
   }
 
+  // Estilo solo en las celdas con encabezado: si se aplica a la fila, se extiende a toda ella.
   const header = sheet.getRow(1);
-  header.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-  header.fill = {
-    type: 'pattern',
-    pattern: 'solid',
-    fgColor: { argb: 'FF041C7B' },
-  };
-  header.alignment = { vertical: 'middle' };
+  header.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    cell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF041C7B' },
+    };
+    cell.alignment = { vertical: 'middle' };
+  });
   header.height = 22;
   sheet.autoFilter = {
     from: { row: 1, column: 1 },

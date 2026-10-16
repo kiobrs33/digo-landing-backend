@@ -78,9 +78,7 @@ export async function excelPlantilla(plantilla: Plantilla) {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'Panel Digo';
 
-  const hoja = workbook.addWorksheet('Destinatarios', {
-    views: [{ state: 'frozen', ySplit: 1 }],
-  });
+  const hoja = workbook.addWorksheet('Destinatarios');
   hoja.columns = columnas.map((columna) => ({
     header: columna.nombre,
     key: columna.nombre,
@@ -136,11 +134,12 @@ export async function excelPlantilla(plantilla: Plantilla) {
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 
+/** Estilo solo en las celdas con encabezado: si se aplica a la fila, se extiende a toda ella. */
 function estiloEncabezado(fila: ExcelJS.Row) {
-  fila.font = { bold: true, color: { argb: 'FFFFFFFF' } };
   fila.eachCell((celda) => {
+    celda.font = { bold: true, color: { argb: 'FFFFFFFF' } };
     celda.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: AZUL } };
+    celda.alignment = { vertical: 'middle' };
   });
   fila.height = 22;
-  fila.alignment = { vertical: 'middle' };
 }
