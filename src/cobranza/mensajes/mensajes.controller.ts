@@ -22,7 +22,8 @@ import {
   ListarDestinatariosQueryDto,
   PruebaDto,
 } from './dto/mensajes.dto.js';
-import { type Cuenta, ParseCuentaPipe } from './cuentas.js';
+import { ChatwootService } from './chatwoot.service.js';
+import { type Canal, type Cuenta, ParseCuentaPipe } from './cuentas.js';
 import { MensajesService } from './mensajes.service.js';
 import { WhatsappService } from './whatsapp.service.js';
 
@@ -37,7 +38,25 @@ export class MensajesController {
   constructor(
     private readonly mensajes: MensajesService,
     private readonly whatsapp: WhatsappService,
+    private readonly chatwoot: ChatwootService,
   ) {}
+
+  private assertCanal(cuenta: Cuenta, canal: Canal = 'WHATSAPP') {
+    this.whatsapp.assertConfigured(cuenta);
+    if (canal === 'CHATWOOT') this.chatwoot.assertConfigured(cuenta);
+  }
+
+  @Get('canales')
+  @ApiOperation({
+    summary: 'Por dónde se puede enviar: Meta directo y/o Chatwoot',
+  })
+  canales(
+    @Param('cuenta', ParseCuentaPipe) cuenta: Cuenta,
+    @CurrentUser() user: AuthUser,
+  ) {
+    assertSiteAccess(user, 'HOGAR');
+    return { chatwoot: this.chatwoot.configurado(cuenta) };
+  }
 
   @Get('plantillas')
   @ApiOperation({ summary: 'Plantillas aprobadas en Meta' })
@@ -114,7 +133,7 @@ export class MensajesController {
     @CurrentUser() user: AuthUser,
   ) {
     assertSiteAccess(user, 'HOGAR');
-    this.whatsapp.assertConfigured(cuenta);
+    this.assertCanal(cuenta, body.canal);
     return this.mensajes.prueba(cuenta, body);
   }
 
@@ -128,7 +147,7 @@ export class MensajesController {
     @CurrentUser() user: AuthUser,
   ) {
     assertSiteAccess(user, 'HOGAR');
-    this.whatsapp.assertConfigured(cuenta);
+    this.assertCanal(cuenta, body.canal);
     return this.mensajes.crearCampana(cuenta, body, user);
   }
 

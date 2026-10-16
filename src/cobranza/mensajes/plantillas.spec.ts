@@ -1,8 +1,10 @@
 import {
   mensajePlantilla,
   normalizarTelefono,
+  parametrosChatwoot,
   type PlantillaMeta,
   resumirPlantilla,
+  textoPlantilla,
   variablesDe,
 } from './plantillas.js';
 
@@ -124,5 +126,34 @@ describe('plantillas', () => {
     expect(normalizarTelefono('054-123456')).toBe('');
     expect(normalizarTelefono('')).toBe('');
     expect(normalizarTelefono('12345')).toBe('');
+  });
+
+  it('arma los parámetros de Chatwoot con el PDF y las variables', () => {
+    const plantilla = resumirPlantilla(meta());
+    const params = parametrosChatwoot(
+      plantilla,
+      {
+        encabezado: 'https://x.pe/recibo.pdf',
+        cuerpo: ['ANA', 'octubre', '15/10'],
+      },
+      new Date('2026-10-15T12:00:00Z'),
+    );
+    expect(params).toEqual({
+      header: {
+        media_url: 'https://x.pe/recibo.pdf',
+        media_type: 'document',
+        media_name: 'doc-octubre.pdf',
+      },
+      body: { '1': 'ANA', '2': 'octubre', '3': '15/10' },
+    });
+  });
+
+  it('escribe en Chatwoot el texto con los valores del cliente', () => {
+    const plantilla = resumirPlantilla(meta());
+    expect(
+      textoPlantilla(plantilla, { cuerpo: ['ANA', 'octubre', '15/10'] }),
+    ).toBe(
+      'Hola ANA, tu recibo de octubre vence el 15/10. Gracias ANA.\n\nDigo Telecom',
+    );
   });
 });

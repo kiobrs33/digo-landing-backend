@@ -156,3 +156,66 @@ export function normalizarTelefono(texto: string): string {
   );
   return match ? `51${match[1].replace(/\D/g, '')}` : '';
 }
+
+/** Texto de la plantilla con las variables reemplazadas: es lo que queda escrito en Chatwoot. */
+export function textoPlantilla(
+  plantilla: Plantilla,
+  { encabezado, cuerpo }: ParametrosMensaje,
+) {
+  const reemplazar = (texto: string, valores: string[], variables: string[]) =>
+    texto.replace(VARIABLE, (original, variable: string) => {
+      const index = variables.indexOf(variable);
+      return index >= 0 && valores[index] ? valores[index] : original;
+    });
+  const titulo =
+    plantilla.encabezado === 'TEXT'
+      ? plantilla.encabezadoConVariable && encabezado
+        ? reemplazar(
+            plantilla.textoEncabezado,
+            [encabezado],
+            variablesDe(plantilla.textoEncabezado),
+          )
+        : plantilla.textoEncabezado
+      : '';
+  return [
+    titulo && `*${titulo}*`,
+    reemplazar(plantilla.cuerpo, cuerpo, plantilla.variables),
+    plantilla.pie,
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+/**
+ * `template_params.processed_params` de Chatwoot (formato por componentes, desde la 4.x): el
+ * encabezado (texto o enlace del archivo) y las variables del cuerpo por su nombre ('1', '2'… o
+ * el nombre si la plantilla es NAMED).
+ */
+export function parametrosChatwoot(
+  plantilla: Plantilla,
+  { encabezado, cuerpo }: ParametrosMensaje,
+  fecha = new Date(),
+) {
+  const params: Record<string, Record<string, string>> = {};
+  if (plantilla.encabezadoConVariable && encabezado) {
+    params.header =
+      plantilla.encabezado === 'TEXT'
+        ? { '1': encabezado }
+        : {
+            media_url: encabezado,
+            media_type: plantilla.encabezado!.toLowerCase(),
+            ...(plantilla.encabezado === 'DOCUMENT'
+              ? { media_name: nombreDocumento(fecha) }
+              : {}),
+          };
+  }
+  if (plantilla.variables.length) {
+    params.body = Object.fromEntries(
+      plantilla.variables.map((variable, index) => [
+        variable,
+        cuerpo[index] ?? '',
+      ]),
+    );
+  }
+  return params;
+}

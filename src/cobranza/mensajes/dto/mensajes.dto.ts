@@ -9,6 +9,7 @@ import {
   MaxLength,
 } from 'class-validator';
 import { PaginationQueryDto } from '../../../common/pagination.js';
+import { CANALES, type Canal } from '../cuentas.js';
 
 /** Estado del envío a cada destinatario. */
 export const ESTADOS_ENVIO = [
@@ -31,7 +32,15 @@ export class PlantillaDto {
   idioma: string;
 }
 
-export class CrearCampanaDto extends PlantillaDto {
+/** Por dónde sale el mensaje; sin indicar, directo a Meta. */
+class ConCanalDto extends PlantillaDto {
+  @ApiPropertyOptional({ enum: CANALES, default: 'WHATSAPP' })
+  @IsOptional()
+  @IsIn(CANALES)
+  canal?: Canal;
+}
+
+export class CrearCampanaDto extends ConCanalDto {
   @ApiProperty({
     description: 'Id que devolvió la carga del Excel de clientes',
   })
@@ -42,7 +51,7 @@ export class CrearCampanaDto extends PlantillaDto {
 /** Campos del formulario multipart al subir el Excel de clientes. */
 export class CargarDestinatariosDto extends PlantillaDto {}
 
-export class PruebaDto extends PlantillaDto {
+export class PruebaDto extends ConCanalDto {
   @ApiProperty({ example: '975303771' })
   @IsString()
   @Length(9, 20)

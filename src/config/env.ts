@@ -32,6 +32,16 @@ export type Env = {
   SPEEDNET_WHATSAPP_PHONE_NUMBER_ID: string;
   SPEEDNET_WHATSAPP_BUSINESS_ID: string;
   SPEEDNET_WHATSAPP_TOKEN: string;
+  /** Chatwoot de Digo: envíos masivos por su bandeja de WhatsApp (quedan como conversación). */
+  CHATWOOT_URL: string;
+  CHATWOOT_ACCOUNT_ID: string;
+  CHATWOOT_INBOX_ID: string;
+  CHATWOOT_TOKEN: string;
+  /** Chatwoot de Speednet. */
+  SPEEDNET_CHATWOOT_URL: string;
+  SPEEDNET_CHATWOOT_ACCOUNT_ID: string;
+  SPEEDNET_CHATWOOT_INBOX_ID: string;
+  SPEEDNET_CHATWOOT_TOKEN: string;
 };
 
 const required = [
@@ -97,5 +107,13 @@ export function validateEnv(raw: Record<string, unknown>): Env {
     SPEEDNET_WHATSAPP_PHONE_NUMBER_ID: str('SPEEDNET_WHATSAPP_PHONE_NUMBER_ID'),
     SPEEDNET_WHATSAPP_BUSINESS_ID: str('SPEEDNET_WHATSAPP_BUSINESS_ID'),
     SPEEDNET_WHATSAPP_TOKEN: str('SPEEDNET_WHATSAPP_TOKEN'),
+    CHATWOOT_URL: str('CHATWOOT_URL').replace(/\/$/, ''),
+    CHATWOOT_ACCOUNT_ID: str('CHATWOOT_ACCOUNT_ID'),
+    CHATWOOT_INBOX_ID: str('CHATWOOT_INBOX_ID'),
+    CHATWOOT_TOKEN: str('CHATWOOT_TOKEN'),
+    SPEEDNET_CHATWOOT_URL: str('SPEEDNET_CHATWOOT_URL').replace(/\/$/, ''),
+    SPEEDNET_CHATWOOT_ACCOUNT_ID: str('SPEEDNET_CHATWOOT_ACCOUNT_ID'),
+    SPEEDNET_CHATWOOT_INBOX_ID: str('SPEEDNET_CHATWOOT_INBOX_ID'),
+    SPEEDNET_CHATWOOT_TOKEN: str('SPEEDNET_CHATWOOT_TOKEN'),
   };
 }

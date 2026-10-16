@@ -27,6 +27,33 @@ export const clavesCuenta: Record<Cuenta, ClavesCuenta> = {
   },
 };
 
+type ClavesChatwoot = {
+  url: keyof Env;
+  cuenta: keyof Env;
+  bandeja: keyof Env;
+  token: keyof Env;
+};
+
+/** Chatwoot de cada cuenta: la bandeja de WhatsApp conectada al mismo número de Meta. */
+export const clavesChatwoot: Record<Cuenta, ClavesChatwoot> = {
+  digo: {
+    url: 'CHATWOOT_URL',
+    cuenta: 'CHATWOOT_ACCOUNT_ID',
+    bandeja: 'CHATWOOT_INBOX_ID',
+    token: 'CHATWOOT_TOKEN',
+  },
+  speednet: {
+    url: 'SPEEDNET_CHATWOOT_URL',
+    cuenta: 'SPEEDNET_CHATWOOT_ACCOUNT_ID',
+    bandeja: 'SPEEDNET_CHATWOOT_INBOX_ID',
+    token: 'SPEEDNET_CHATWOOT_TOKEN',
+  },
+};
+
+/** Por dónde sale el mensaje: directo a Meta o por la bandeja de Chatwoot. */
+export const CANALES = ['WHATSAPP', 'CHATWOOT'] as const;
+export type Canal = (typeof CANALES)[number];
+
 /** `:cuenta` de la URL: solo las cuentas conocidas. */
 export class ParseCuentaPipe implements PipeTransform<string, Cuenta> {
   transform(value: string): Cuenta {

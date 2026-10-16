@@ -22,19 +22,23 @@ import {
   columnaVariable,
   excelPlantilla,
 } from './plantilla-excel.js';
+import { ChatwootService } from './chatwoot.service.js';
 import {
   mensajePlantilla,
   normalizarTelefono,
   type ParametrosMensaje,
   type Plantilla,
 } from './plantillas.js';
-import type { Cuenta } from './cuentas.js';
+import type { Canal, Cuenta } from './cuentas.js';
 import { WhatsappService } from './whatsapp.service.js';
 
 const COLUMNA_TELEFONO = 'Teléfono';
 /** Mensajes simultáneos por lote y pausa entre lotes (muy por debajo del límite de Meta). */
 const LOTE = 20;
 const PAUSA_MS = 1000;
+/** Por Chatwoot: veces que se revisa al final si Chatwoot ya pasó los mensajes a WhatsApp. */
+const REVISIONES_FINALES = 5;
+const ESPERA_REVISION_MS = 3000;
 /** Tiempo que el Excel subido queda disponible para crear la campaña. */
 const ARCHIVO_TTL_MS = 60 * 60_000;
 /** Tiempo que una campaña terminada sigue visible (para revisar y descargar el resultado). */
@@ -72,11 +76,17 @@ type Destinatario = {
   detalle: string | null;
   messageId: string | null;
   enviado: Date | null;
+  /** Por Chatwoot: la conversación y el mensaje que se escribió en ella. */
+  conversacion: number | null;
+  mensajeChatwoot: number | null;
+  /** Por Chatwoot: falta saber si WhatsApp lo aceptó (Chatwoot lo envía en segundo plano). */
+  porConfirmar: boolean;
 };
 
 type Campana = {
   id: string;
   cuenta: Cuenta;
+  canal: Canal;
   plantilla: Plantilla;
   archivo: string;
   estado: 'EN_CURSO' | 'COMPLETADA' | 'CANCELADA';
@@ -101,7 +111,10 @@ export class MensajesService implements OnApplicationShutdown {
   private readonly campanas = new Map<string, Campana>();
   private apagando = false;
 
-  constructor(private readonly whatsapp: WhatsappService) {}
+  constructor(
+    private readonly whatsapp: WhatsappService,
+    private readonly chatwoot: ChatwootService,
+  ) {}
 
   onApplicationShutdown() {
     this.apagando = true;
@@ -286,6 +299,9 @@ export class MensajesService implements OnApplicationShutdown {
     const parametros = { encabezado: dto.encabezado, cuerpo: dto.variables };
     const faltante = validarParametros(plantilla, parametros);
     if (faltante) throw new BadRequestException(faltante);
+    if (dto.canal === 'CHATWOOT') {
+      return this.pruebaChatwoot(cuenta, plantilla, telefono, parametros);
+    }
     const resultado = await this.whatsapp.enviar(
       cuenta,
       mensajePlantilla(plantilla, telefono, parametros),
@@ -293,6 +309,41 @@ export class MensajesService implements OnApplicationShutdown {
     );
     if (!resultado.ok) throw new BadRequestException(resultado.error);
     return { telefono, messageId: resultado.messageId };
+  }
+
+  /** La prueba por Chatwoot espera a que Chatwoot la pase a WhatsApp para avisar si falló. */
+  private async pruebaChatwoot(
+    cuenta: Cuenta,
+    plantilla: Plantilla,
+    telefono: string,
+    parametros: ParametrosMensaje,
+  ) {
+    await this.chatwoot.assertPlantilla(cuenta, plantilla);
+    const resultado = await this.chatwoot.enviar(
+      cuenta,
+      plantilla,
+      telefono,
+      'Prueba de envío masivo',
+      parametros,
+      1,
+    );
+    if (!resultado.ok) throw new BadRequestException(resultado.error);
+    for (let intento = 0; intento < 4; intento++) {
+      await espera(2000);
+      const estado = await this.chatwoot
+        .estado(cuenta, resultado.conversacionId, resultado.mensajeId)
+        .catch(() => null);
+      if (estado?.estado === 'ERROR')
+        throw new BadRequestException(estado.error);
+      if (estado?.estado === 'ENVIADO') break;
+    }
+    return {
+      telefono,
+      conversacion: this.chatwoot.enlaceConversacion(
+        cuenta,
+        resultado.conversacionId,
+      ),
+    };
   }
 
   async crearCampana(cuenta: Cuenta, dto: CrearCampanaDto, user: AuthUser) {
@@ -303,6 +354,10 @@ export class MensajesService implements OnApplicationShutdown {
         `El Excel se subió para la plantilla "${plantilla.nombre}". Vuelve a subirlo para esta plantilla.`,
       );
     }
+    const canal = dto.canal ?? 'WHATSAPP';
+    if (canal === 'CHATWOOT') {
+      await this.chatwoot.assertPlantilla(cuenta, plantilla);
+    }
     const destinatarios = archivo.clientes.map((cliente): Destinatario => ({
       fila: cliente.fila,
       telefono: cliente.telefono,
@@ -312,6 +367,9 @@ export class MensajesService implements OnApplicationShutdown {
       detalle: cliente.problema,
       messageId: null,
       enviado: null,
+      conversacion: null,
+      mensajeChatwoot: null,
+      porConfirmar: false,
     }));
     if (!destinatarios.some((d) => d.estado === 'PENDIENTE')) {
       throw new BadRequestException(
@@ -322,6 +380,7 @@ export class MensajesService implements OnApplicationShutdown {
     const campana: Campana = {
       id: randomUUID(),
       cuenta,
+      canal,
       plantilla,
       archivo: archivo.nombre,
       estado: 'EN_CURSO',
@@ -350,32 +409,111 @@ export class MensajesService implements OnApplicationShutdown {
         .filter((d) => d.estado === 'PENDIENTE')
         .slice(0, LOTE);
       if (!lote.length) {
+        if (campana.canal === 'CHATWOOT') await this.confirmarFinal(campana);
         campana.estado = 'COMPLETADA';
         campana.terminada = new Date();
         return;
       }
       await Promise.all(
-        lote.map(async (destinatario) => {
-          const resultado = await this.whatsapp.enviar(
-            campana.cuenta,
-            mensajePlantilla(
-              campana.plantilla,
-              destinatario.telefono,
-              destinatario.parametros,
-            ),
-          );
-          if (resultado.ok) {
-            destinatario.estado = 'ENVIADO';
-            destinatario.messageId = resultado.messageId;
-            destinatario.enviado = new Date();
-            destinatario.detalle = null;
-          } else {
+        lote.map((destinatario) => this.enviarA(campana, destinatario)),
+      );
+      await espera(PAUSA_MS);
+      if (campana.canal === 'CHATWOOT') {
+        await this.confirmar(campana, ESPERA_REVISION_MS);
+      }
+    }
+  }
+
+  private async enviarA(campana: Campana, destinatario: Destinatario) {
+    if (campana.canal === 'CHATWOOT') {
+      const resultado = await this.chatwoot.enviar(
+        campana.cuenta,
+        campana.plantilla,
+        destinatario.telefono,
+        destinatario.nombre,
+        destinatario.parametros,
+      );
+      if (resultado.ok) {
+        destinatario.estado = 'ENVIADO';
+        destinatario.conversacion = resultado.conversacionId;
+        destinatario.mensajeChatwoot = resultado.mensajeId;
+        destinatario.porConfirmar = true;
+        destinatario.enviado = new Date();
+        destinatario.detalle = null;
+      } else {
+        destinatario.estado = 'ERROR';
+        destinatario.detalle = resultado.error;
+      }
+      return;
+    }
+    const resultado = await this.whatsapp.enviar(
+      campana.cuenta,
+      mensajePlantilla(
+        campana.plantilla,
+        destinatario.telefono,
+        destinatario.parametros,
+      ),
+    );
+    if (resultado.ok) {
+      destinatario.estado = 'ENVIADO';
+      destinatario.messageId = resultado.messageId;
+      destinatario.enviado = new Date();
+      destinatario.detalle = null;
+    } else {
+      destinatario.estado = 'ERROR';
+      destinatario.detalle = resultado.error;
+    }
+  }
+
+  /**
+   * Chatwoot pasa los mensajes a WhatsApp en segundo plano: se revisa cada uno enviado hace al
+   * menos `antiguedadMs` y se marca como error si Meta lo rechazó.
+   */
+  private async confirmar(campana: Campana, antiguedadMs: number) {
+    const ahora = Date.now();
+    const porRevisar = campana.destinatarios.filter(
+      (d) =>
+        d.porConfirmar &&
+        d.conversacion !== null &&
+        d.enviado &&
+        ahora - d.enviado.getTime() >= antiguedadMs,
+    );
+    for (let inicio = 0; inicio < porRevisar.length; inicio += LOTE) {
+      await Promise.all(
+        porRevisar.slice(inicio, inicio + LOTE).map(async (destinatario) => {
+          const estado = await this.chatwoot
+            .estado(
+              campana.cuenta,
+              destinatario.conversacion!,
+              destinatario.mensajeChatwoot,
+            )
+            .catch(() => null);
+          if (estado?.estado === 'ENVIADO') {
+            destinatario.porConfirmar = false;
+            destinatario.messageId = estado.wamid;
+          } else if (estado?.estado === 'ERROR') {
+            destinatario.porConfirmar = false;
             destinatario.estado = 'ERROR';
-            destinatario.detalle = resultado.error;
+            destinatario.detalle = estado.error;
           }
         }),
       );
-      await espera(PAUSA_MS);
+    }
+  }
+
+  /** Al terminar, unas revisiones más para los que Chatwoot aún no había enviado. */
+  private async confirmarFinal(campana: Campana) {
+    for (let vez = 0; vez < REVISIONES_FINALES; vez++) {
+      if (!campana.destinatarios.some((d) => d.porConfirmar)) return;
+      await espera(ESPERA_REVISION_MS);
+      await this.confirmar(campana, 0);
+    }
+    for (const destinatario of campana.destinatarios) {
+      if (destinatario.porConfirmar) {
+        destinatario.porConfirmar = false;
+        destinatario.detalle =
+          'Chatwoot aún no confirmaba el envío a WhatsApp: revisa la conversación.';
+      }
     }
   }
 
@@ -475,12 +613,27 @@ export class MensajesService implements OnApplicationShutdown {
         { header: 'Resultado', width: 12, value: (d) => estado[d.estado] },
         { header: 'Detalle', width: 50, kind: 'text', value: (d) => d.detalle },
         { header: 'Enviado', width: 18, kind: 'date', value: (d) => d.enviado },
+        ...(campana.canal === 'CHATWOOT'
+          ? [
+              {
+                header: 'Conversación en Chatwoot',
+                width: 60,
+                value: (d: Destinatario) =>
+                  d.conversacion === null
+                    ? null
+                    : this.chatwoot.enlaceConversacion(
+                        campana.cuenta,
+                        d.conversacion,
+                      ),
+              },
+            ]
+          : []),
       ],
       campana.destinatarios,
     );
     return {
       archivo,
-      nombre: `envios_${campana.cuenta}_${campana.plantilla.nombre}_${campana.creada.toISOString().slice(0, 10)}.xlsx`,
+      nombre: `envios_${campana.cuenta}${campana.canal === 'CHATWOOT' ? '_chatwoot' : ''}_${campana.plantilla.nombre}_${campana.creada.toISOString().slice(0, 10)}.xlsx`,
     };
   }
 
@@ -514,6 +667,7 @@ function resumen(campana: Campana) {
     campana.destinatarios.filter((d) => d.estado === estado).length;
   return {
     id: campana.id,
+    canal: campana.canal,
     plantilla: campana.plantilla.nombre,
     idioma: campana.plantilla.idioma,
     archivo: campana.archivo,

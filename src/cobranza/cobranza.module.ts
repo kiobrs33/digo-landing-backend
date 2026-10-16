@@ -3,6 +3,7 @@ import { CobranzaController } from './cobranza.controller.js';
 import { CobranzaService } from './cobranza.service.js';
 import { MensajesController } from './mensajes/mensajes.controller.js';
 import { MensajesService } from './mensajes/mensajes.service.js';
+import { ChatwootService } from './mensajes/chatwoot.service.js';
 import { WhatsappService } from './mensajes/whatsapp.service.js';
 import { MikrowispService } from './mikrowisp.service.js';
 
@@ -18,6 +19,7 @@ import { MikrowispService } from './mikrowisp.service.js';
     MikrowispService,
     MensajesService,
     WhatsappService,
+    ChatwootService,
   ],
 })
 export class CobranzaModule {}
