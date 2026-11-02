@@ -135,7 +135,7 @@ export async function excelPlantilla(plantilla: Plantilla) {
 }
 
 /** Estilo solo en las celdas con encabezado: si se aplica a la fila, se extiende a toda ella. */
-function estiloEncabezado(fila: ExcelJS.Row) {
+export function estiloEncabezado(fila: ExcelJS.Row) {
   fila.eachCell((celda) => {
     celda.font = { bold: true, color: { argb: 'FFFFFFFF' } };
     celda.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: AZUL } };

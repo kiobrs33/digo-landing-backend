@@ -15,12 +15,14 @@ import {
 } from './conciliacion.js';
 import {
   COLUMNAS_USUARIOS,
+  type DetalleDeuda,
   deudasPorUsuarios,
   nombreMes,
   type RegistroTelecredito,
   TELECREDITO_HEADERS,
 } from './deudas.js';
 import { readMikrowispSheet } from './excel-input.js';
+import { estiloEncabezado } from './mensajes/plantilla-excel.js';
 import {
   type ClienteMikrowisp,
   type ConsultaCliente,
@@ -133,9 +135,9 @@ export class CobranzaService {
             `${base}.xlsx`,
             XLSX,
             await excelTelecredito(
-              'USUARIOS_PARSEADOS',
               registros,
               opciones.tipoCarga,
+              resultado.detalles,
             ),
           ),
         },
@@ -351,20 +353,45 @@ async function enParalelo<T>(
   );
 }
 
+/** Ancho de cada columna de la hoja "Carga BCP" (los encabezados no se cambian: son los del BCP). */
+const ANCHO_TELECREDITO: Record<keyof RegistroTelecredito, number> = {
+  codigo_depositante: 20,
+  nombre_depositante: 40,
+  informacion_retorno: 20,
+  fecha_emision: 15,
+  fecha_vencimiento: 18,
+  monto_pagar: 14,
+  mora_cargo_fijo: 16,
+  monto_minimo: 14,
+  tipo_registro: 14,
+  nro_documento_pago: 20,
+  nro_documento_identidad: 24,
+};
+
 /**
- * Excel de la carga de deudas con las columnas del macro del BCP (A–K, fechas como texto
- * DD/MM/YYYY) para pegar desde la fila 11. El "Tipo de Registro" va con el texto exacto de la
- * lista del macro: "No Aplica" en un reemplazo y "Agregar" en una actualización (con otro valor,
- * el macro rechaza la fila o arma mal el TXT).
+ * Excel para el macro del BCP (hoja "Carga BCP", columnas A a K) y una hoja "Mensajes WhatsApp"
+ * con el celular y nombre de los mismos clientes, en el mismo orden, para pegarlos en el Excel
+ * de destinatarios de Mensajes masivos. Encabezados en azul y fijos al desplazarse.
+ *
+ * Las columnas A–K llevan las fechas como texto DD/MM/YYYY y se pegan desde la fila 11. El
+ * "Tipo de Registro" va con el texto exacto de la lista del macro: "No Aplica" en un reemplazo y
+ * "Agregar" en una actualización (con otro valor, el macro rechaza la fila o arma mal el TXT).
  */
 async function excelTelecredito(
-  hoja: string,
   registros: RegistroTelecredito[],
   tipoCarga: TipoCarga,
+  detalles: DetalleDeuda[],
 ) {
   const workbook = new ExcelJS.Workbook();
-  const sheet = workbook.addWorksheet(hoja);
-  sheet.addRow(TELECREDITO_HEADERS);
+  workbook.creator = 'Panel Digo';
+  const fijarEncabezado = { views: [{ state: 'frozen' as const, ySplit: 1 }] };
+
+  const sheet = workbook.addWorksheet('Carga BCP', fijarEncabezado);
+  sheet.columns = TELECREDITO_HEADERS.map((key) => ({
+    header: key,
+    width: ANCHO_TELECREDITO[key],
+  }));
+  estiloEncabezado(sheet.getRow(1));
   const tipoRegistro = tipoCarga === 'REEMPLAZO' ? 'No Aplica' : 'Agregar';
   for (const registro of registros) {
     sheet.addRow(
@@ -373,6 +400,17 @@ async function excelTelecredito(
       ),
     );
   }
+
+  const mensajes = workbook.addWorksheet('Mensajes WhatsApp', fijarEncabezado);
+  // Texto: Excel no convierte el celular en número. Encabezados iguales a los de Mensajes masivos.
+  mensajes.columns = [
+    { header: 'Teléfono', width: 14, style: { numFmt: '@' } },
+    { header: 'Nombre', width: 40, style: { numFmt: '@' } },
+  ];
+  estiloEncabezado(mensajes.getRow(1));
+  detalles.forEach((detalle) => {
+    mensajes.addRow([detalle.telefono, detalle.nombre]);
+  });
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 

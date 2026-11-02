@@ -1,5 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import type { SheetRow } from './excel-input.js';
+import { normalizarTelefono } from './mensajes/plantillas.js';
 
 /**
  * Registro de la carga de deudas de Telecrédito (BCP). Los nombres y el orden de las claves son
@@ -46,6 +47,10 @@ export type DetalleDeuda = {
   estado: string;
   /** Recibos pendientes según Mikrowisp ("2 S/. 158.00" → 2). */
   recibos: number;
+  /** Nombre tal como está en Mikrowisp, sin el estado (para el Excel de mensajes). */
+  nombre: string;
+  /** Celular de 9 dígitos (columna Movil y, si no sirve, Telefono); vacío si no hay uno válido. */
+  telefono: string;
 };
 
 /** Resultado del parser: los registros y lo que no entró. */
@@ -106,6 +111,15 @@ export function parseMonto(texto: string): number {
   const match = /S\/\.?\s*([\d.,]+)/i.exec(value);
   const number = Number((match ? match[1] : value).replace(/,/g, ''));
   return Number.isFinite(number) ? Math.round(number * 100) / 100 : 0;
+}
+
+/** Celular de 9 dígitos de la fila: primero "Movil", si no "Telefono"; vacío si ninguno sirve. */
+export function celularCliente(fila: SheetRow): string {
+  for (const columna of ['Movil', 'Telefono']) {
+    const telefono = normalizarTelefono(fila[columna] ?? '');
+    if (telefono) return telefono.slice(2);
+  }
+  return '';
 }
 
 /** Cantidad de recibos que Mikrowisp antepone al monto ("2 S/. 158.00" → 2; sin deuda → 0). */
@@ -234,7 +248,12 @@ export function deudasPorUsuarios(
     validos.push({
       emisionIso,
       fila: numeroFila,
-      detalle: { estado, recibos: contarRecibos(fila['Deuda actual'] ?? '') },
+      detalle: {
+        estado,
+        recibos: contarRecibos(fila['Deuda actual'] ?? ''),
+        nombre: nombre.replace(/\s+/g, ' ').trim(),
+        telefono: celularCliente(fila),
+      },
       codigo_depositante: documento,
       nombre_depositante: normalizarNombre(nombre),
       informacion_retorno: mes,

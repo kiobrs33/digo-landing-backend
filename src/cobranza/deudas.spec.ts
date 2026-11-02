@@ -154,8 +154,34 @@ describe('detalles de la carga', () => {
       '11111111',
     ]);
     expect(detalles).toEqual([
-      { estado: 'SUSPENDIDO', recibos: 4 },
-      { estado: 'ACTIVO', recibos: 1 },
+      { estado: 'SUSPENDIDO', recibos: 4, nombre: 'LUIS', telefono: '' },
+      { estado: 'ACTIVO', recibos: 1, nombre: 'ANA', telefono: '' },
+    ]);
+  });
+
+  it('toma el celular de Movil y, si no sirve, de Telefono', () => {
+    const { detalles } = deudasPorUsuarios(
+      [
+        {
+          ...usuario('ANA  ACTIVO', '11111111', '1', '1 S/. 49.00'),
+          Movil: '987 654 321',
+        },
+        {
+          ...usuario('LUIS  ACTIVO', '22222222', '1', '1 S/. 39.00'),
+          Movil: '12345',
+          Telefono: '912345678, 999888777',
+        },
+        {
+          ...usuario('EVA  ACTIVO', '33333333', '1', '1 S/. 29.00'),
+          Movil: '',
+        },
+      ],
+      { hoy: '2026-10-05', diasVencimiento: 10, ciclo: 1 },
+    );
+    expect(detalles.map((d) => [d.nombre, d.telefono])).toEqual([
+      ['ANA', '987654321'],
+      ['LUIS', '912345678'],
+      ['EVA', ''],
     ]);
   });
 });
