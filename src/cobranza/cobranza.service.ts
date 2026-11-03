@@ -435,7 +435,7 @@ async function excelPagosMikrowisp(listos: FilaConciliacion[]) {
     width: 24,
     style: { numFmt: '@' },
   }));
-  sheet.getRow(1).font = { bold: true };
+  estiloEncabezado(sheet.getRow(1));
   for (const fila of listos) {
     fila.facturas.forEach((factura, index) => {
       sheet.addRow([
