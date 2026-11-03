@@ -65,6 +65,8 @@ export type OpcionesDeudas = {
   ciclo?: number;
   incluirSinDeuda: boolean;
   tipoCarga: TipoCarga;
+  /** Mes de las deudas, 'YYYY-MM'; sin él, el mes actual en Lima. */
+  mes?: string;
 };
 
 @Injectable()
@@ -83,9 +85,10 @@ export class CobranzaService {
   ) {
     const filas = await readMikrowispSheet(file, COLUMNAS_USUARIOS);
     const hoy = limaIsoDate();
-    const resultado = deudasPorUsuarios(filas, { hoy, ...opciones });
+    const mes = opciones.mes ?? hoy.slice(0, 7);
+    const resultado = deudasPorUsuarios(filas, { ...opciones, mes });
     const analisis = {
-      mes: nombreMes(hoy),
+      mes: nombreMes(mes),
       ciclos: resultado.ciclos,
       excluidosPorEstado: resultado.excluidosPorEstado,
     };
@@ -98,7 +101,7 @@ export class CobranzaService {
       );
     }
     const accion = opciones.tipoCarga === 'REEMPLAZO' ? 'reemplazo' : 'agregar';
-    const base = `CREP_ciclo-${opciones.ciclo}_${accion}_${hoy}`;
+    const base = `CREP_${mes}_ciclo-${opciones.ciclo}_${accion}`;
     const txt = txtCargaTelecredito(registros, {
       tipo: opciones.tipoCarga,
       fecha: hoy,

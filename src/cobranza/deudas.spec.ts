@@ -65,7 +65,7 @@ describe('deudasPorUsuarios', () => {
     usuario('SIN ESTADO', '44444444', '1', '1 S/. 10.00'),
     usuario("O'BRIEN ÑANDÚ  ACTIVO", '44338396', '1', '1 S/. 20.00'),
   ];
-  const base = { hoy: '2026-09-20', diasVencimiento: 10 };
+  const base = { mes: '2026-09', diasVencimiento: 10 };
 
   it('resume los ciclos (día de pago) con clientes y deuda', () => {
     const { ciclos, excluidosPorEstado } = deudasPorUsuarios(filas, base);
@@ -115,6 +115,20 @@ describe('deudasPorUsuarios', () => {
     });
   });
 
+  it('usa el mes elegido en la emisión, el retorno y el documento de pago', () => {
+    const [registro] = deudasPorUsuarios(filas, {
+      ...base,
+      mes: '2026-12',
+      ciclo: 1,
+    }).registros;
+    expect(registro).toMatchObject({
+      informacion_retorno: 'DICIEMBRE',
+      fecha_emision: '01/12/2026',
+      fecha_vencimiento: '11/12/2026',
+      nro_documento_pago: 'B12260001',
+    });
+  });
+
   it('incluye a los que no deben si se pide', () => {
     const conTodos = deudasPorUsuarios(filas, {
       ...base,
@@ -147,7 +161,7 @@ describe('detalles de la carga', () => {
         usuario('ANA  ACTIVO', '11111111', '1', '1 S/. 49.00'),
         usuario('LUIS  SUSPENDIDO', '22222222', '1', '4 S/. 356.00'),
       ],
-      { hoy: '2026-10-05', diasVencimiento: 10, ciclo: 1 },
+      { mes: '2026-10', diasVencimiento: 10, ciclo: 1 },
     );
     expect(registros.map((r) => r.nro_documento_identidad)).toEqual([
       '22222222',
@@ -176,7 +190,7 @@ describe('detalles de la carga', () => {
           Movil: '',
         },
       ],
-      { hoy: '2026-10-05', diasVencimiento: 10, ciclo: 1 },
+      { mes: '2026-10', diasVencimiento: 10, ciclo: 1 },
     );
     expect(detalles.map((d) => [d.nombre, d.telefono])).toEqual([
       ['ANA', '987654321'],

@@ -150,8 +150,8 @@ export const COLUMNAS_USUARIOS = [
 ];
 
 export type OpcionesUsuarios = {
-  /** Hoy en Lima, 'YYYY-MM-DD': la emisión cae en este mes. */
-  hoy: string;
+  /** Mes de las deudas, 'YYYY-MM': la emisión cae en este mes. */
+  mes: string;
   diasVencimiento: number;
   /** Día de pago del ciclo a cargar; sin él, todos los ciclos. */
   ciclo?: number;
@@ -172,12 +172,12 @@ export function separarEstado(nombre: string) {
   return { nombre: match[1], estado };
 }
 
-/** Día de pago dentro del mes de `hoy`; el 31 en un mes de 30 días queda en el último día. */
-function emisionDelMes(hoy: string, diaPago: number): string {
-  const [year, month] = hoy.split('-').map(Number);
+/** Día de pago dentro de `mes` (YYYY-MM); el 31 en un mes de 30 días queda en el último día. */
+function emisionDelMes(mes: string, diaPago: number): string {
+  const [year, month] = mes.split('-').map(Number);
   const ultimo = new Date(Date.UTC(year, month, 0)).getUTCDate();
   const dia = Math.min(diaPago, ultimo);
-  return `${hoy.slice(0, 7)}-${String(dia).padStart(2, '0')}`;
+  return `${mes.slice(0, 7)}-${String(dia).padStart(2, '0')}`;
 }
 
 /**
@@ -188,9 +188,14 @@ function emisionDelMes(hoy: string, diaPago: number): string {
  */
 export function deudasPorUsuarios(
   filas: SheetRow[],
-  { hoy, diasVencimiento, ciclo, incluirSinDeuda = false }: OpcionesUsuarios,
+  {
+    mes: periodo,
+    diasVencimiento,
+    ciclo,
+    incluirSinDeuda = false,
+  }: OpcionesUsuarios,
 ): ResultadoDeudas {
-  const mes = nombreMes(hoy);
+  const mes = nombreMes(periodo);
   const omitidos: ResultadoDeudas['omitidos'] = [];
   const excluidosPorEstado: Record<string, number> = {};
   const ciclos = new Map<number, CicloDeudas>();
@@ -244,7 +249,7 @@ export function deudasPorUsuarios(
         documento ? 'Cédula con caracteres no válidos' : 'Sin cédula',
       );
     }
-    const emisionIso = emisionDelMes(hoy, diaPago);
+    const emisionIso = emisionDelMes(periodo, diaPago);
     validos.push({
       emisionIso,
       fila: numeroFila,

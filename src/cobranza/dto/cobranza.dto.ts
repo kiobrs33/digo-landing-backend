@@ -1,6 +1,14 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
-import { IsBoolean, IsIn, IsInt, IsOptional, Max, Min } from 'class-validator';
+import {
+  IsBoolean,
+  IsIn,
+  IsInt,
+  IsOptional,
+  Matches,
+  Max,
+  Min,
+} from 'class-validator';
 
 /** Campos del formulario multipart (llegan como texto). */
 export class DeudasUsuariosDto {
@@ -44,4 +52,14 @@ export class DeudasUsuariosDto {
   @IsOptional()
   @IsIn(['REEMPLAZO', 'ACTUALIZACION'])
   tipoCarga?: 'REEMPLAZO' | 'ACTUALIZACION';
+
+  @ApiPropertyOptional({
+    description: 'Mes de las deudas (YYYY-MM). Sin él, el mes actual en Lima.',
+    example: '2026-11',
+  })
+  @IsOptional()
+  @Matches(/^\d{4}-(0[1-9]|1[0-2])$/, {
+    message: 'El mes debe tener el formato YYYY-MM.',
+  })
+  mes?: string;
 }

@@ -58,6 +58,7 @@ export class CobranzaController {
         ciclo: body.ciclo,
         incluirSinDeuda: body.incluirSinDeuda ?? false,
         tipoCarga: body.tipoCarga ?? 'REEMPLAZO',
+        mes: body.mes,
       },
       user,
     );
