@@ -371,7 +371,7 @@ const ANCHO_TELECREDITO: Record<keyof RegistroTelecredito, number> = {
 /**
  * Excel para el macro del BCP (hoja "Carga BCP", columnas A a K) y una hoja "Mensajes WhatsApp"
  * con el celular y nombre de los mismos clientes, en el mismo orden, para pegarlos en el Excel
- * de destinatarios de Mensajes masivos. Encabezados en azul y fijos al desplazarse.
+ * de destinatarios de Mensajes masivos. Encabezados en azul.
  *
  * Las columnas A–K llevan las fechas como texto DD/MM/YYYY y se pegan desde la fila 11. El
  * "Tipo de Registro" va con el texto exacto de la lista del macro: "No Aplica" en un reemplazo y
@@ -384,9 +384,8 @@ async function excelTelecredito(
 ) {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'Panel Digo';
-  const fijarEncabezado = { views: [{ state: 'frozen' as const, ySplit: 1 }] };
 
-  const sheet = workbook.addWorksheet('Carga BCP', fijarEncabezado);
+  const sheet = workbook.addWorksheet('Carga BCP');
   sheet.columns = TELECREDITO_HEADERS.map((key) => ({
     header: key,
     width: ANCHO_TELECREDITO[key],
@@ -401,7 +400,7 @@ async function excelTelecredito(
     );
   }
 
-  const mensajes = workbook.addWorksheet('Mensajes WhatsApp', fijarEncabezado);
+  const mensajes = workbook.addWorksheet('Mensajes WhatsApp');
   // Texto: Excel no convierte el celular en número. Encabezados iguales a los de Mensajes masivos.
   mensajes.columns = [
     { header: 'Teléfono', width: 14, style: { numFmt: '@' } },
